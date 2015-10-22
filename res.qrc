@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/">
+        <file>BackMainWindow.jpg</file>
+        <file>logo_spectr.png</file>
+        <file>Danger.png</file>
+        <file>Images/DesignInterface.png</file>
+        <file>Images/Rocker.png</file>
+    </qresource>
+</RCC>

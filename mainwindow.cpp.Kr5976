@@ -1,0 +1,4074 @@
+/* Для чтения с БДХК */
+
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QtSerialPort/QSerialPort>
+#include <QDebug>
+#include <QByteArray>
+#include <windows.h>
+#include <QMessageBox>
+#include <QSettings>
+#include <QFile>
+#include <QList>
+#include <QTimer>
+#include <QThread>
+#include <QTextCodec>
+#include <QStringList>
+#include <QtCore/qmath.h>
+#include <QtSql>
+
+
+
+
+
+
+QSerialPort *serial;
+QSerialPort *port;
+QSerialPort *portkrxo;
+QStringList list, listhex;
+QString str,sum;
+QByteArray ba;
+QString latitude, longitude; //широта, долгота для GPS-датчика
+int statusdanger=0;//статус знака опасности
+
+
+//глобальные переменные для ПДК датчиков БДХК
+float PDKSolKisl, PDKMonoYgl, PDKYglGaz, PDKSerVod, PDKOksSer, PDKFtvk,
+      PDKHlor, PDKAmiak, PDKH2CO, PDKOksAzot, PDKHP10, PDKMetan, PDKPropan,
+      PDKGeksan, PDKHCN, PDKGB, PDKHD;
+
+
+//глобальные переменные для значения с датчиков БДХК
+QString gHp10, gMetan, gFtvk, gMonoYgl, gSerVod, gHlor, gGeksan, gOksSer,
+        gOksAzot, gSolKisl, gPropan, gAmmiak, gYglGaz, gGB, gHD, gHCN, gH2CO;
+
+//глобальные переменные для значения с метео БДХК
+QString Sm, Dm, Pa, Ta, Ua;
+
+//глобальная переменная - кол-во записей в БК РХО
+QString rec;
+
+QTimer* timer  = new QTimer;
+QTimer* timer2 = new QTimer;
+
+
+QString trap="54524150",
+        sek="bd656b09",
+        sec="736563",
+        min="6d696e",
+        hour="686f7572",
+        mounth="6d6f6e7468",
+        day="646179",
+        year="79656172",
+        hp10="48703130",
+        metan="cce5f2e0ed",
+        ftorkisl="d4f2eef0eee2eee4eef0eee4ede0ff20eae8f1ebeef2e0",
+        monoygl="cceeedeeeeeaf1e8e420f3e3ebe5f0eee4e0",
+        servod="d1e5f0eee2eee4eef0eee4",
+        hlor="d5ebeef0",
+        geksan="c3e5eaf1e0ed",
+        oksser="ceeaf1e8e420f1e5f0fb",
+        oksazot="ceeaf1e8e420e0e7eef2e0",
+        solkisl="d1eeebffede0ff20eae8f1ebeef2e0",
+        propan="cff0eeefe0ed",
+        amiak="c0ecece8e0ea",
+        yglgaz="d3e3ebe5eae8f1ebfbe920e3e0e7",
+        gb="4742",
+        hd="4844",
+        hcn="d1e8ede8ebfcede0ff20eae8f1ebeef2e0"/*"48434e"*/, //синильная кислота
+        h2co="d4eef0ece0ebfce4e5e3e8e4"/*"4832434f"*/, //формальдегид
+
+        comand1="01211001",
+        zpt="2c";
+
+QList<int> posledov; //собираем номера-последовательность датчиков
+
+
+QStringList getComPortList() //получаем список com-портов из реестра
+{
+    QStringList list;
+    HKEY hKey = 0;
+
+    if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, TEXT("HARDWARE\\DEVICEMAP\\SERIALCOMM"), NULL, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD cbMaxValueNameLen, cbMaxValueLen;
+
+        if (RegQueryInfoKey(hKey, // дескриптор ключа
+                            NULL, // адрес буфера для имени класса
+                            NULL, // адрес размера буфер для имени класса
+                            NULL, // зарезервировано
+                            NULL, // адрес буфера для количества подключей
+                            NULL, // адрес буфера для наибольшего размера имени подключа
+                            NULL, // адрес буфера для наибольшего размера имени класса
+                            NULL, // адрес буфера для количества вхождений значений
+                            &cbMaxValueNameLen,       // адрес буфера для наибольшего размера имени значения
+                            &cbMaxValueLen, // адрес буфера для наибольшего размера данных значения
+                            NULL,       // адрес буфера для длины дескриптора безопасности
+                            NULL        // адрес буфера для получения времени последней записи
+            ) == ERROR_SUCCESS)
+        {
+            cbMaxValueNameLen++;
+            cbMaxValueLen++;
+            TCHAR ValueName[cbMaxValueNameLen];
+            DWORD Type = REG_SZ;
+            BYTE Data[cbMaxValueLen];
+            char temp[cbMaxValueLen];
+            DWORD cbValueNameLen, cbValueLen;
+
+            DWORD index = 0;
+            cbValueNameLen = cbMaxValueNameLen;
+            cbValueLen = cbMaxValueLen;
+            while (RegEnumValue(hKey,  // дескриптор запрашиваемого ключа
+                            index++,  // индекс запрашиваемого значения
+                            ValueName, // адрес буфера для имени значения
+                            &cbValueNameLen, // адрес переменной с  размером буфера для имени значения
+                            NULL, // зарезервировано
+                            &Type,  // адрес переменной с типом данных
+                            Data,  // адрес буфера для данных значения
+                            &cbValueLen  // адрес переменной с  размером буфера для данных
+                   ) == ERROR_SUCCESS)
+            {
+                wcstombs(temp, (WCHAR*)Data, cbValueLen/2);
+                list.append(temp);
+                cbValueNameLen = cbMaxValueNameLen;
+                cbValueLen = cbMaxValueLen;
+            }
+        }
+        RegCloseKey(hKey);
+    }
+
+
+
+    QRegExp COM("COM");
+    QString temp;
+    QStringList strlsttemp;
+
+    for (int i=0; i<list.length(); i++) //убираем слово "COM"
+    {
+
+        if ( COM.indexIn(list.at(i)) == 0 )
+        {
+            temp = list.at(i).mid(3,list.at(i).length()-3);
+            strlsttemp.append(temp);
+        }
+    }
+
+    for (int i=0; i<strlsttemp.length()-1; i++) // упорядочиваем номера по возрастанию
+    {
+        if (strlsttemp.at(i+1).toFloat() < strlsttemp.at(i).toFloat())
+        {
+            QString s;
+            s = strlsttemp.at(i+1);
+            strlsttemp[i+1] = strlsttemp.at(i);
+            strlsttemp[i] = s;
+        }
+
+        else
+        {
+        i = i + 1;
+        }
+    }
+
+    for (int i=0; i<strlsttemp.length()-1; i++) //добавляем слово "COM"
+    {
+        list[i] = "COM" + strlsttemp.at(i);
+    }
+
+    return list;
+}
+
+
+//============================================================================================
+//============================================================================================
+//============================= БДХК =========================================================
+//============================================================================================
+//============================================================================================
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+
+    ui->setupUi(this);
+    status=1;
+    SetPDK();
+
+    QPalette palette;
+    //palette.setColor(QPalette::Text, Qt::red);
+    palette.setColor(QPalette::Window, Qt::red);
+
+
+    //ui->lineEdit_6->setStyleSheet("selection-background-color: rgb(255, 255, 127);");
+    //ui->lineEdit_6->setStyleSheet("background-image: url(:/Images/Green.png);");
+
+
+
+    connect(this, SIGNAL(read(QString)), this, SLOT(parse_rxo(QString)));
+
+
+    ui->pb_closeportkrxo->setEnabled(false);
+    ui->le_countkrxo->setEnabled(false);
+
+    ui->groupBox_8->setVisible(false);
+    ui->pb_giveGPSBDHK->setVisible(false);
+
+
+    for (int i=0; i<getComPortList().length(); i++) //добавляем в комбо список в соответствии с количеством портов
+    {
+        ui->comboBox->addItem(getComPortList().at(i)); //для БДХК
+        ui->cb_gpscomport->addItem(getComPortList().at(i)); //для GPS
+        ui->cb_portkrxo->addItem(getComPortList().at(i)); //для АСКРХО
+    }
+
+    portCloseStyleSheet();
+    deviceOff(); //убираем элементы, т.к. не прошли идентиф.
+    groupbox(false);
+    ui->progressBar->setVisible(false);
+    ui->img_danger->setVisible(false);
+    portCloseStyleGPS();
+
+
+
+
+}
+
+void MainWindow::deviceOff() //не получили идент. пакет от устройства
+{
+    ui->label_time->setVisible(false);//убираем время
+    ui->label_date->setVisible(false);//убираем дату
+
+    ui->label_hp10->setVisible(false);//убираем МЭД
+    ui->lineEdit_Hp10->setVisible(false);
+
+    ui->label_metan->setVisible(false);//убираем Метан
+    ui->lineEdit_metan->setVisible(false);
+
+    ui->label_ftvk->setVisible(false);//убираем Фт-Вод. Кислота
+    ui->lineEdit_ftvk->setVisible(false);
+
+    ui->label_monoygl->setVisible(false);//убираем Моноксид углерода
+    ui->lineEdit_monoygl->setVisible(false);
+
+    ui->label_servod->setVisible(false);//убираем Сероводород
+    ui->lineEdit_servod->setVisible(false);
+
+    ui->label_hlor->setVisible(false);//убираем Хлор
+    ui->lineEdit_hlor->setVisible(false);
+
+    ui->label_geksan->setVisible(false);//убираем Гексан
+    ui->lineEdit_geksan->setVisible(false);
+
+    ui->label_oksser->setVisible(false);//убираем Оксид серы
+    ui->lineEdit_oksser->setVisible(false);
+
+    ui->label_oksazot->setVisible(false);//убираем Оксид азота
+    ui->lineEdit_oksazot->setVisible(false);
+
+    ui->label_solkisl->setVisible(false);//убираем Соляная кислота
+    ui->lineEdit_solkisl->setVisible(false);
+
+    ui->label_propan->setVisible(false);//убираем Пропан
+    ui->lineEdit_propan->setVisible(false);
+
+    ui->label_amiak->setVisible(false);//убираем Аммиак
+    ui->lineEdit_amiak->setVisible(false);
+
+    ui->label_yglgaz->setVisible(false);//убираем Углекислый газ
+    ui->lineEdit_yglgaz->setVisible(false);
+
+    ui->label_gb->setVisible(false);//убираем GB
+    ui->lineEdit_gb->setVisible(false);
+
+    ui->label_hd->setVisible(false);//убираем HD
+    ui->lineEdit_hd->setVisible(false);
+
+    ui->label_hcn->setVisible(false);//убираем HCN
+    ui->lineEdit_hcn->setVisible(false);
+
+    ui->label_h2co->setVisible(false);//убираем H2CO
+    ui->lineEdit_h2co->setVisible(false);
+
+    ui->groupBox_3->setEnabled(false);
+    ui->groupBox_4->setEnabled(false);
+    ui->groupBox_6->setEnabled(false);
+}
+
+MainWindow::~MainWindow()
+{
+
+   //serial->close();
+    delete ui;
+}
+
+
+void MainWindow::SetPDK()
+{
+
+    QSettings *settings = new QSettings("HKEY_CURRENT_USER\\Software\\SPECTR\\ASCRHO", QSettings::NativeFormat);
+
+
+    if (!settings->contains("PDKSolKisl"))
+    {
+        settings->setValue("PDKSolKisl", 5);
+        ui->statusBar->showMessage("ПДК для соляной кислоты выставлено по умолчанию = 5.0");
+    }
+
+    PDKSolKisl = settings->value("PDKSolKisl").toFloat();
+}
+
+
+
+void MainWindow::serialReceived()  //получаем пакеты
+{
+
+    if (status==0)
+    {
+    ui->statusBar->showMessage("Читаем данные");
+
+    ba=serial->read(4);//считываем по 4 байта
+    list.append(ba);
+    listhex.append(ba.toHex());
+
+    //qDebug()<<"list.append(ba)"<<list;
+    //qDebug()<<"list.append(ba.toHex())"<<listhex;
+
+    ui->statusBar->showMessage("Обмен осуществлён");
+    }
+    else ui->statusBar->showMessage("Подключение отсутствует. Не удалось serialReceived");
+}
+
+void MainWindow::ComConnect() //инициализируем порт
+{
+
+    serial = new QSerialPort(this);
+    serial->setPortName(ui->comboBox->currentText());
+    serial->setBaudRate(QSerialPort::Baud9600);
+    serial->setDataBits(QSerialPort::Data8);
+    serial->setParity(QSerialPort::NoParity);
+    serial->setStopBits(QSerialPort::OneStop);
+    serial->setFlowControl(QSerialPort::NoFlowControl);
+    if (serial->open(QIODevice::ReadWrite))
+    {
+        //qDebug()<< "COMPORT OPEN!";
+        status=0;
+        portOpenStyleSheet();
+        connect(serial, SIGNAL(readyRead()),this,SLOT(serialReceived()));
+        ui->statusBar->showMessage("Соединение установлено");
+        monitorOff();
+
+    }
+    else
+    {
+        //qDebug()<<"COMPORT CLOSE!";
+        status=1;
+        portCloseStyleSheet();
+        ui->statusBar->showMessage("Соединение отсутствует");
+        serial->close();
+
+
+    }
+
+    //serial->write("ok");
+
+
+    //monitorOn();//Включили передачу каждую минуту
+    //getType();
+
+
+
+}
+
+bool MainWindow::getType() //Запрос типов датчиков
+{
+    list.clear();
+    listhex.clear();
+
+    char data[8]; //0x54 0x52 0x41 0x50 1 0x08 0x81 0x08
+    data[0]=0x54;
+    data[1]=0x52;
+    data[2]=0x41;
+    data[3]=0x50;
+    data[4]=0x01; //1 = 0x01
+    data[5]=0x08;
+    data[6]=0x81;
+    data[7]=0x08;
+
+   if (serial->isOpen()) //если порт открыт
+    {
+    serial->write(data,8);
+        if (serial->waitForBytesWritten(3000)) //ждем пока не запишутся все данные
+            return true;
+        else
+            return false;
+    }
+   else                   //если порт закрыт
+       return false;
+}
+
+void MainWindow::monitorOff() //Выключить передачу каждую минуту
+{
+
+    list.clear();
+    listhex.clear();
+
+    if (status==0) //status=0 - подключение установленно
+    {
+
+    ui->statusBar->showMessage("Отключаем мониторинг каждую минуту");
+    char data[9]; //0x54 0x52 0x41 0x50 2 0x21 0x10 0x00 0x01
+
+
+    data[0]=0x54;
+    data[1]=0x52;
+    data[2]=0x41;
+    data[3]=0x50;
+    data[4]=0x02; //2 = 0x02
+    data[5]=0x21;
+    data[6]=0x10;
+    data[7]=0x00;
+    data[8]=0x01;
+
+
+    serial->write(data,9);
+
+    serial->waitForBytesWritten(500);
+    qDebug()<<"Пакет послан monitorOff";
+    ui->statusBar->showMessage("Мониторинг каждую минуту - отключить - команда послана");
+    }
+    else ui->statusBar->showMessage(tr("Соединение отсутствует. Не удалось monitorOff"));
+
+    listhex.clear();
+}
+
+void MainWindow::monitorOn() //Включить передачу каждую минуту
+{
+    char data[9]; //0x54 0x52 0x41 0x50 2 0x00 0x00 0x00 0x00
+
+    list.clear();
+    listhex.clear();
+
+    data[0]=0x54;
+    data[1]=0x52;
+    data[2]=0x41;
+    data[3]=0x50;
+    data[4]=0x02; //2 = 0x02
+    data[5]=0x00;
+    data[6]=0x00;
+    data[7]=0x00;
+    data[8]=0x00;
+    serial->write(data,9);
+    serial->waitForBytesWritten(500);
+    qDebug()<<"Пакет послан monitorOn";
+    ui->statusBar->showMessage("Мониторинг каждую минуту включён");
+
+    listhex.clear();
+
+}
+
+void MainWindow::portCloseStyleSheet() //описание стиля. Порт закрыт
+{
+    ui->pushButton_clport->setVisible(false);
+    ui->pushButton_opport->setVisible(true);
+    ui->pushButton_opport->setEnabled(true);
+    ui->groupBox->setStyleSheet("color: rgb(255, 0, 0)"); //красный
+    ui->groupBox->setTitle("Порт закрыт");
+    ui->comboBox->setEnabled(true);
+    ui->pbtn_type->setVisible(false); //кнопка Тип
+    ui->pushButton_getValue->setVisible(false);
+    ui->progressBar->setVisible(false); //убираем ProgressBar
+
+
+
+    ui->lineEdit_amiak->setVisible(false);
+    ui->lineEdit_ftvk->setVisible(false);
+    ui->lineEdit_gb->setVisible(false);
+    ui->lineEdit_geksan->setVisible(false);
+    ui->lineEdit_h2co->setVisible(false);
+    ui->lineEdit_hcn->setVisible(false);
+    ui->lineEdit_hd->setVisible(false);
+    ui->lineEdit_hlor->setVisible(false);
+    ui->lineEdit_Hp10->setVisible(false);
+    ui->lineEdit_metan->setVisible(false);
+    ui->lineEdit_monoygl->setVisible(false);
+    ui->lineEdit_oksazot->setVisible(false);
+    ui->lineEdit_oksser->setVisible(false);
+    ui->lineEdit_propan->setVisible(false);
+    ui->lineEdit_servod->setVisible(false);
+    ui->lineEdit_solkisl->setVisible(false);
+    ui->lineEdit_yglgaz->setVisible(false);
+
+
+    ui->label_solkisl->setVisible(false);
+    ui->label_amiak->setVisible(false);
+    ui->label_ftvk->setVisible(false);
+    ui->label_gb->setVisible(false);
+    ui->label_geksan->setVisible(false);
+    ui->label_h2co->setVisible(false);
+    ui->label_hcn->setVisible(false);
+    ui->label_hd->setVisible(false);
+    ui->label_hlor->setVisible(false);
+    ui->label_hp10->setVisible(false);
+    ui->label_metan->setVisible(false);
+    ui->label_monoygl->setVisible(false);
+    ui->label_oksazot->setVisible(false);
+    ui->label_oksser->setVisible(false);
+    ui->label_propan->setVisible(false);
+    ui->label_servod->setVisible(false);
+    ui->label_yglgaz->setVisible(false);
+
+    ui->label_date->setVisible(false);
+    ui->label_time->setVisible(false);
+
+    ui->pb_giveMeteo->setVisible(false);
+    ui->radioButton->setVisible(false);
+
+    ui->te_meteo->clear();
+
+}
+
+void MainWindow::portOpenStyleSheet() //описание стиля. Порт открыт
+{
+    ui->pushButton_clport->setVisible(true);
+    ui->pushButton_opport->setVisible(false);
+    ui->pushButton_opport->setEnabled(false);
+    ui->groupBox->setStyleSheet("color: rgb(255, 228, 0)"); //светло-зелёный
+    ui->groupBox->setTitle("Порт открыт");
+    ui->comboBox->setEnabled(false);
+    ui->pbtn_type->setVisible(true);
+    ui->pbtn_type->setEnabled(true);
+
+    ui->pb_giveMeteo->setVisible(true);
+    ui->radioButton->setVisible(true);
+}
+
+void MainWindow::on_pushButton_opport_clicked() //кнопка открыть порт
+{
+    ui->pushButton_opport->setEnabled(false); //отркыть порт не активна
+    ui->statusBar->showMessage("Подключаемся к порту");
+    timer->singleShot(50, this, SLOT(ComConnect())); //переходим в ComConnect через 50 мс
+}
+
+void MainWindow::on_pushButton_clport_clicked() //кнопка закрыть порт
+{
+    serial->close();
+    status=1;
+    portCloseStyleSheet();
+    all_lineedit_enable(false);//гасим все LineEdit
+    text_all_lineedit("");//чистим все LineEdit
+    groupbox(false);//гасим все GroupBox
+    ui->statusBar->showMessage(tr("Порт закрыт"));
+}
+
+void MainWindow::on_pbtn_type_clicked() //кнопка. получить тип датчиков
+{
+
+    if (status==0)
+ {
+   getType(); //отправляем команду
+   timer->singleShot(1000, this, SLOT(getlist())); //переходим в getlist через 1 с - парсим данные
+   ui->pbtn_type->setEnabled(false);
+   ui->pushButton_getValue->setEnabled(true);
+  }
+   else ui->statusBar->showMessage("Порт закрыт. Типы датчиков не получены");
+
+
+}
+
+bool MainWindow::compare(QString a, QStringList b, int c)
+{
+//a - слово для сравнения (заголовки датчиков)
+//b - название списка
+//c - номер группы
+
+
+    for(int i=0;i<a.length();i++)
+ {
+
+        if (b[c].at(i)==a.at(i))
+            return true;
+        else
+            return false;
+ }
+}
+
+bool MainWindow::comparestr(QString a, int c)
+{
+//a - слово для сравнения (заголовки датчиков)
+//c - номер ячейки в str с которой начать сравнивать
+
+bool result=true;
+
+    for(int i=0;i<a.length();i++)
+ {
+
+        if (str[c+i]==a.at(i))
+            result=result && true;
+        else
+            result=result && false;
+ }
+
+    return result;
+
+}
+
+void MainWindow::getlist() //парсим Идент.
+{
+
+    str=listhex.join(""); //соединяем в строку весь HEX код
+    posledov.clear();
+
+
+    if (comparestr(trap,0)) //заголовок верный (TRAP)
+                {
+                    ui->statusBar->showMessage("Верный заголовок пакета"); //если верный заголовок, тогда читаем дальше
+                        qDebug()<<str;
+                    /* Верный формат времени SEK SEC MIN HOUR */
+                    if (/*(comparestr(sek,8))&*/comparestr(sec,16)&&comparestr(min,24)&&comparestr(hour,32))
+                    {
+                        ui->statusBar->showMessage("Верный заголовок времени");
+                        ui->label_time->setVisible(true);
+                        ui->label_time->setText("Время");
+                    }
+                    /* Верный формат даты MOUNTH DAY YEAR */
+                    if ((comparestr(mounth,42))&&comparestr(day,54)&&comparestr(year,62))
+                    {
+                        ui->statusBar->showMessage("Верный заголовок даты");
+                        ui->label_date->setVisible(true);
+                        ui->label_date->setText("Дата");
+                    }
+
+
+                        for (int i=72; i<=436/*374*/; i++) //начинаем шагать с 72 по 1 биту и проверять на совпадения
+                        {
+                    /* Верный формат МЭД */
+                    if ((comparestr(hp10,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'МЭД'");
+                        ui->label_hp10->setVisible(true);
+                        ui->label_hp10->setText("МЭД");
+                        ui->lineEdit_Hp10->setVisible(true);
+                        i=i+hp10.length()-1;
+                        posledov.append(1);
+                    }
+                    /* Верный формат Метан */
+                    if ((comparestr(metan,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Метан'");
+                        ui->label_metan->setVisible(true);
+                        ui->label_metan->setText("Метан, этан");
+                        ui->lineEdit_metan->setVisible(true);
+                        i=i+metan.length()-1;
+                        posledov.append(2);
+                    }
+                    /* Верный формат Фторовод. кислота */
+                    if ((comparestr(ftorkisl,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Фт-вод. кислота'");
+                        ui->label_ftvk->setVisible(true);
+                        ui->label_ftvk->setText("Фт-вод. кислота");
+                        ui->lineEdit_ftvk->setVisible(true);
+                        i=i+ftorkisl.length()-1;
+                        posledov.append(3);
+                    }
+                    /* Верный формат Моноксид углерода */
+                    if ((comparestr(monoygl,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Моноксид углерода'");
+                        ui->label_monoygl->setVisible(true);
+                        ui->label_monoygl->setText("Моноксид углерода");
+                        ui->lineEdit_monoygl->setVisible(true);
+                        i=i+monoygl.length()-1;
+                        posledov.append(4);
+                    }
+                    /* Верный формат Сероводород */
+                    if ((comparestr(servod,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Сероводород'");
+                        ui->label_servod->setVisible(true);
+                        ui->label_servod->setText("Сероводород");
+                        ui->lineEdit_servod->setVisible(true);
+                        i=i+servod.length()-1;
+                        posledov.append(5);
+                    }
+                    /* Верный формат Хлор */
+                    if ((comparestr(hlor,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Хлор'");
+                        ui->label_hlor->setVisible(true);
+                        ui->label_hlor->setText("Хлор");
+                        ui->lineEdit_hlor->setVisible(true);
+                        i=i+hlor.length()-1;
+                        posledov.append(6);
+                    }
+                    /* Верный формат Гексан */
+                    if ((comparestr(geksan,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Гексан'");
+                        ui->label_geksan->setVisible(true);
+                        ui->label_geksan->setText("Пентан, гексан");
+                        ui->lineEdit_geksan->setVisible(true);
+                        i=i+geksan.length()-1;
+                        posledov.append(7);
+                    }
+                    /* Верный формат Оксид серы */
+                    if ((comparestr(oksser,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Оксид серы'");
+                        ui->label_oksser->setVisible(true);
+                        ui->label_oksser->setText("Оксид серы");
+                        ui->lineEdit_oksser->setVisible(true);
+                        i=i+oksser.length()-1;
+                        posledov.append(8);
+                    }
+                    /* Верный формат Оксид азота */
+                    if ((comparestr(oksazot,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Оксид азота'");
+                        ui->label_oksazot->setVisible(true);
+                        ui->label_oksazot->setText("Оксид азота");
+                        ui->lineEdit_oksazot->setVisible(true);
+                        i=i+oksazot.length()-1;
+                        posledov.append(9);
+                    }
+                    /* Верный формат Соляная кислота */
+                    if ((comparestr(solkisl,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Соляная кислота'");
+                        ui->label_solkisl->setVisible(true);
+                        ui->label_solkisl->setText("Соляная кислота");
+                        ui->lineEdit_solkisl->setVisible(true);
+                        i=i+solkisl.length()-1;
+                        posledov.append(10);
+                    }
+                    /* Верный формат Пропан */
+                    if ((comparestr(propan,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Пропан'");
+                        ui->label_propan->setVisible(true);
+                        ui->label_propan->setText("Пропан, бутан");
+                        ui->lineEdit_propan->setVisible(true);
+                        i=i+propan.length()-1;
+                        posledov.append(11);
+                    }
+                    /* Верный формат Аммиак */
+                    if ((comparestr(amiak,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Аммиак'");
+                        ui->label_amiak->setVisible(true);
+                        ui->label_amiak->setText("Аммиак");
+                        ui->lineEdit_amiak->setVisible(true);
+                        i=i+amiak.length()-1;
+                        posledov.append(12);
+                    }
+                    /* Верный формат Углекислый газ */
+                    if ((comparestr(yglgaz,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'Углекислый газ'");
+                        ui->label_yglgaz->setVisible(true);
+                        ui->label_yglgaz->setText("Углекислый газ");
+                        ui->lineEdit_yglgaz->setVisible(true);
+                        i=i+yglgaz.length()-1;
+                        posledov.append(13);
+                    }
+                    /* Верный формат GB */
+                    if ((comparestr(gb,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'GB'");
+                        ui->label_gb->setVisible(true);
+                        ui->label_gb->setText("GB");
+                        ui->lineEdit_gb->setVisible(true);
+                        i=i+gb.length()-1;
+                        posledov.append(14);
+                    }
+                    /* Верный формат HD */
+                    if ((comparestr(hd,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'HD'");
+                        ui->label_hd->setVisible(true);
+                        ui->label_hd->setText("HD");
+                        ui->lineEdit_hd->setVisible(true);
+                        i=i+hd.length()-1;
+                        posledov.append(15);
+                    }
+                    /* Верный формат HCN */
+                    if ((comparestr(hcn,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'HCN'");
+                        ui->label_hcn->setVisible(true);
+                        ui->label_hcn->setText("Синильная кислота");
+                        ui->lineEdit_hcn->setVisible(true);
+                        i=i+hcn.length()-1;
+                        posledov.append(16);
+                    }
+                    /* Верный формат H2CO */
+                    if ((comparestr(h2co,i)))
+                    {
+                        ui->statusBar->showMessage("Верный формат 'H2CO'");
+                        ui->label_h2co->setVisible(true);
+                        ui->label_h2co->setText("Формальдегид");
+                        ui->lineEdit_h2co->setVisible(true);
+                        i=i+h2co.length()-1;
+                        posledov.append(17);
+                    }
+                    if (comparestr(zpt,i)) //если нет датчика - запятая
+                    {
+                        posledov.append(0);
+                    }
+              ui->pushButton_getValue->setVisible(true);
+                        }
+                     groupbox(true); //"зажигаем" все GroupBox
+    }
+
+    else
+    {
+        ui->statusBar->showMessage("Неверный заголовок пакета. Переподключитесь");
+        ui->pbtn_type->setEnabled(true);
+    }
+
+    str.clear();
+    list.clear();
+    listhex.clear();
+
+}
+
+void MainWindow::text_all_lineedit(QString text) //текст на всех LineEdit датчиков
+{
+    ui->lineEdit_amiak->setText(text);
+    ui->lineEdit_ftvk->setText(text);
+    ui->lineEdit_gb->setText(text);
+    ui->lineEdit_geksan->setText(text);
+    ui->lineEdit_h2co->setText(text);
+    ui->lineEdit_hcn->setText(text);
+    ui->lineEdit_hd->setText(text);
+    ui->lineEdit_hlor->setText(text);
+    ui->lineEdit_Hp10->setText(text);
+    ui->lineEdit_metan->setText(text);
+    ui->lineEdit_monoygl->setText(text);
+    ui->lineEdit_oksazot->setText(text);
+    ui->lineEdit_oksser->setText(text);
+    ui->lineEdit_propan->setText(text);
+    ui->lineEdit_servod->setText(text);
+    ui->lineEdit_solkisl->setText(text);
+    ui->lineEdit_yglgaz->setText(text);
+}
+
+void MainWindow::all_lineedit_enable(bool en) //состояние всех LineEdit датчиков
+{
+    ui->lineEdit_amiak->setEnabled(en);
+    ui->lineEdit_ftvk->setEnabled(en);
+    ui->lineEdit_gb->setEnabled(en);
+    ui->lineEdit_geksan->setEnabled(en);
+    ui->lineEdit_h2co->setEnabled(en);
+    ui->lineEdit_hcn->setEnabled(en);
+    ui->lineEdit_hd->setEnabled(en);
+    ui->lineEdit_hlor->setEnabled(en);
+    ui->lineEdit_Hp10->setEnabled(en);
+    ui->lineEdit_metan->setEnabled(en);
+    ui->lineEdit_monoygl->setEnabled(en);
+    ui->lineEdit_oksazot->setEnabled(en);
+    ui->lineEdit_oksser->setEnabled(en);
+    ui->lineEdit_propan->setEnabled(en);
+    ui->lineEdit_servod->setEnabled(en);
+    ui->lineEdit_solkisl->setEnabled(en);
+    ui->lineEdit_yglgaz->setEnabled(en);
+}
+
+void MainWindow::groupbox(bool stat) //состояние всех GroupBox для датчиков
+{
+    ui->groupBox_3->setEnabled(stat);
+    ui->groupBox_4->setEnabled(stat);
+    ui->groupBox_6->setEnabled(stat);
+}
+
+void MainWindow::on_pushButton_getValue_clicked() //кнопка получить значения
+{
+    disconnect(timer2, SIGNAL(timeout()), this, SLOT(TimerTick()));
+
+    listhex.clear();
+    list.clear();
+    monitorOn();//включаем мониторинг
+
+    ui->pushButton_getValue->setEnabled(false);
+
+    ui->progressBar->setMinimum(0);
+    ui->progressBar->setMaximum(100);
+
+
+    text_all_lineedit("Считываю...");
+    all_lineedit_enable(false);
+
+    //=== Для ProgressBar ===
+
+
+    timer2->start(600);
+    ui->progressBar->setVisible(true);
+    ui->progressBar->setValue(2);
+    connect(timer2, SIGNAL(timeout()), this, SLOT(TimerTick()));
+
+    /*
+    if (timer2->isActive())
+    {
+    ui->pbtn_type->setEnabled(false);
+    ui->pushButton_getValue->setEnabled(false);
+    }
+    else
+    {
+        ui->pbtn_type->setEnabled(true);
+        ui->pushButton_getValue->setEnabled(true);
+    }
+    */
+
+
+
+    timer->singleShot(1000*60, this, SLOT(Value())); //переходим в Value через 1 мин
+
+
+
+}
+
+bool MainWindow::Value() //парсим значения
+{
+    str.clear();
+    str=listhex.join("");
+    qDebug()<<str;
+    if (comparestr(trap,0)) //заголовок верный (TRAP)
+                {
+
+                    ui->statusBar->showMessage("Верный заголовок пакета"); //если верный заголовок, тогда читаем дальше
+                    if (comparestr(comand1,8) && comparestr(trap,16)) // 0121100154524150 - верно
+                     {
+                        if (comparestr("05",30))//вход для считывания значений 0x05
+                            ui->statusBar->showMessage("Верный вход для считывания");
+                        {
+                            // час:минута:сек
+                            ui->label_time->setText(str.at(36) + (str.at(37).toLatin1()) + tr(":") +
+                                                   (str.at(34).toLatin1()) + (str.at(35).toLatin1()) + tr(":") +
+                                                   (str.at(32).toLatin1()) + (str.at(33).toLatin1()));
+
+                            // день:месяц:год
+                            ui->label_date->setText(str.at(38) + (str.at(39).toLatin1()) + tr(".") +
+                                                   (str.at(40).toLatin1()) + (str.at(41).toLatin1()) + tr(".") +
+                                                    tr("20") +(str.at(42).toLatin1()) + (str.at(43).toLatin1()));
+
+
+                            int b=51;//51 - конечный бит первого пакета значений; 179 - конечный бит последнего пакета
+
+                                    for (int p=0; p<posledov.length(); p++) //17 - общее количество значений с датчиков
+
+                                    {
+                                        {
+                                            qDebug()<<"POSLEDOV ALL"<<posledov;
+                                            qDebug()<<"POSLEDOV.at(p)"<<posledov.at(p);
+
+                                            switch (posledov.at(p))
+                                                {
+                                            case 1:
+                                                // Hp10
+
+                                                qDebug()<<"B-Hp10"<<b;
+                                                gHp10 = FormatText(IEEE754(b));
+                                                ui->lineEdit_Hp10->setText(gHp10);
+                                                ui->lineEdit_Hp10->insert(" [мкЗв/ч]");
+                                                b=b+8;
+                                                break;
+
+                                            case 2:
+
+                                                // Метан
+
+                                                qDebug()<<"B-Метан"<<b;
+                                                gMetan = FormatText(IEEE754(b));
+                                                ui->lineEdit_metan->setText(gMetan);
+                                                ui->lineEdit_metan->insert(" [об.%]");
+                                                b=b+8;
+                                                break;
+
+                                            case 3:
+                                                // Фтороводородная кислота
+
+                                                qDebug()<<"B-Фторвод"<<b;
+                                                gFtvk = FormatText(IEEE754(b));
+                                                ui->lineEdit_ftvk->setText(gFtvk);
+                                                ui->lineEdit_ftvk->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 4:
+                                                //  Моноксид углерода
+
+                                                qDebug()<<"B-Моноксид углерода"<<b;
+                                                gMonoYgl = FormatText(IEEE754(b));
+                                                ui->lineEdit_monoygl->setText(gMonoYgl);
+                                                ui->lineEdit_monoygl->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 5:
+
+                                                //  Сероводород
+
+                                                qDebug()<<"B-Сероводород"<<b;
+                                                gSerVod = FormatText(IEEE754(b));
+                                                ui->lineEdit_servod->setText( gSerVod );
+                                                ui->lineEdit_servod->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 6:
+                                                //  Хлор
+
+                                                qDebug()<<"B-Хлор"<<b;
+                                                gHlor = FormatText(IEEE754(b));
+                                                ui->lineEdit_hlor->setText( gHlor );
+                                                ui->lineEdit_hlor->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 7:
+                                                //  Гексан
+
+                                                qDebug()<<"B-Гексан"<<b;
+                                                gGeksan = FormatText(IEEE754(b));
+                                                ui->lineEdit_geksan->setText( gGeksan );
+                                                ui->lineEdit_geksan->insert(" [мг/л]");
+                                                b=b+8;
+                                                break;
+
+                                            case 8:
+                                                //  Оксид серы
+
+                                                qDebug()<<"B-Оксид серы"<<b;
+                                                gOksSer = FormatText(IEEE754(b));
+                                                ui->lineEdit_oksser->setText( gOksSer );
+                                                ui->lineEdit_oksser->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 9:
+
+                                                //  Оксид азота
+
+                                                qDebug()<<"B-Оксид азота"<<b;
+                                                gOksAzot = FormatText(IEEE754(b));
+                                                ui->lineEdit_oksazot->setText( gOksAzot );
+                                                ui->lineEdit_oksazot->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 10:
+
+                                                //  Соляная кислота
+
+                                                qDebug()<<"B-Соляная кислота"<<b;
+                                                gSolKisl = FormatText(IEEE754(b));
+                                                ui->lineEdit_solkisl->setText( gSolKisl );
+                                                ui->lineEdit_solkisl->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 11:
+                                                //  Пропан
+
+                                                qDebug()<<"B-Пропан"<<b;
+                                                gPropan = FormatText(IEEE754(b));
+                                                ui->lineEdit_propan->setText( gPropan );
+                                                ui->lineEdit_propan->insert(" [об.%]");
+                                                b=b+8;
+                                                break;
+
+                                            case 12:
+                                                //  Аммиак
+
+                                                qDebug()<<"B-Аммиак"<<b;
+                                                gAmmiak = FormatText(IEEE754(b));
+                                                ui->lineEdit_amiak->setText( gAmmiak );
+                                                ui->lineEdit_amiak->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 13:
+                                                // Углекислый газ
+
+                                                qDebug()<<"B-Углекислый газ"<<b;
+                                                gYglGaz = FormatText(IEEE754(b));
+                                                ui->lineEdit_yglgaz->setText( gYglGaz );
+                                                ui->lineEdit_yglgaz->insert(" [об.%]");
+                                                b=b+8;
+                                                break;
+
+                                            case 14:
+                                                //  Иприт  (GB)
+
+
+                                                qDebug()<<"B-Иприт  (GB)"<<b;
+
+
+                                                if (FormatText(IEEE754(b))=="0.0")
+                                                {
+                                                  ui->lineEdit_gb->setText("В норме");
+                                                  gGB = "0";
+                                                }
+                                                if (IEEE754(b)=="1")
+                                                {
+                                                  ui->lineEdit_gb->setText("1 порог");
+                                                  gGB = "1";
+                                                }
+                                                if (IEEE754(b)=="100")
+                                                {
+                                                  ui->lineEdit_gb->setText("2 порог");
+                                                  gGB = "100";
+                                                }
+
+
+                                                //ui->lineEdit_gb->setText(FormatText(IEEE754(b)));
+                                                //ui->lineEdit_gb->setText(IEEE754(b));
+
+                                                b=b+8;                                              
+                                                break;
+
+                                            case 15:
+                                                //  Зарин (HD)
+
+                                                qDebug()<<"B-HD"<<b;
+                                                if (FormatText(IEEE754(b))=="0.0")
+                                                {
+                                                  ui->lineEdit_hd->setText("В норме");
+                                                  gHD = "0";
+                                                }
+                                                if (FormatText(IEEE754(b))=="2.000")
+                                                {
+                                                  ui->lineEdit_hd->setText("1 порог");
+                                                  gHD = "2";
+                                                }
+                                                if (FormatText(IEEE754(b))=="200.0")
+                                                {
+                                                  ui->lineEdit_hd->setText("2 порог");
+                                                  gHD = "200";
+                                                }
+                                                //ui->lineEdit_hd->setText(FormatText(IEEE754(b)));
+                                                b=b+8;
+                                                break;
+
+                                            case 16:
+                                                //  HCN
+
+                                                qDebug()<<"B-HCN"<<b;
+                                                gHCN = FormatText(IEEE754(b));
+                                                ui->lineEdit_hcn->setText( gHCN );
+                                                ui->lineEdit_hcn->insert(" [мг/м3]");
+                                                b=b+8;
+                                                break;
+
+                                            case 17:
+                                                //  H2CO - формальдегид
+
+                                                qDebug()<<"B-H2CO"<<b;
+                                                gH2CO = FormatText(IEEE754(b));
+                                                ui->lineEdit_h2co->setText( gH2CO );
+                                                b=b+8;
+                                                break;
+
+                                            default:
+                                                if (posledov.at(p-1)==0)
+                                                {
+                                                    b=b+8;
+                                                }
+                                                //b=b+8;
+                                                break;
+                                                }
+
+
+                               } //_for
+                            }//_for
+                        }//_if
+                     }
+
+
+                }
+    else ui->statusBar->showMessage(tr("Не верный заголовок пакета данных"));
+
+
+    if (ui->cb_automode->isChecked())
+    {
+       SQLBDHK();
+    }
+
+    str.clear();
+    listhex.clear();
+    list.clear();
+    ui->pushButton_getValue->setEnabled(true);
+    ui->pushButton_getValue->setEnabled(true);
+    all_lineedit_enable(true);
+    monitorOff();
+
+
+    if (ui->cb_automode->isChecked())
+    {
+      on_pb_giveMeteo_clicked();
+    }
+}
+
+QString MainWindow::FormatText(QString IEEE754) //полученный результат приводим к 4-х значному виду: значение*(10^-6)
+{
+
+    //В IEEE754 приходит число. Пр.: 1.21487e-07
+
+    if (IEEE754.mid((IEEE754.length()-4),1)=="e") //начинаем искать 4-ый символ с конца строки (e) чтобы узнать, что число в степени
+    {
+
+        int stepen=IEEE754.right(3).toInt(); //последние три знака в строке в int: -07
+        float fl=IEEE754.left(5).toFloat(); //первые 5 символов слева: 1.214
+
+        if (stepen>-9 & stepen<-4) // если число не больше 10^-4 и не меньше 10^-9
+        {
+            QString strl=QString::number(fl/(qPow(10,(-6-(stepen))))); // 1.214/10^(-6-(-07)) т.е. получаем 0.1214
+            strl.resize(5);//возвращаем значение. Снова ограничиваем 5 первыми знаками: 0.121
+            return strl;
+        }
+        else
+        {
+            if (stepen>-4) //если больше 10^-4 т.е. очень большое число
+            {
+                return ">999";
+            }
+
+            if (stepen<-9) //если больше 10^-9 т.е. очень маленькое
+            {
+                return "0.0";
+            }
+        }
+    }
+    else //если число без степени
+    {
+        IEEE754.resize(5);
+        return IEEE754;
+    }
+}
+
+QString MainWindow::IEEE754(int b) //входной HEX (32bit) переводим в BIN и высчитываем значение по формату IEEE754
+{
+
+    //b - конечный байт
+
+    qDebug()<<"STR AT b-8"<<str.at(b-7);
+    qDebug()<<"STR AT b-8"<<str.at(b-6);
+    qDebug()<<"STR AT b-8"<<str.at(b-5);
+    qDebug()<<"STR AT b-8"<<str.at(b-4);
+    qDebug()<<"STR AT b-8"<<str.at(b-3);
+    qDebug()<<"STR AT b-8"<<str.at(b-2);
+    qDebug()<<"STR AT b-8"<<str.at(b-1);
+    qDebug()<<"STR AT"<<str.at(b);
+
+
+
+    QString qs, qsE, qsM;
+    int E,M, znak;
+    float F;
+
+    qs.clear();
+    qsE.clear();
+    qsM.clear();
+    E=0;
+    M=0;
+    F=0;
+
+    qDebug()<<"STRIEEEEE"<<str;
+
+    for (int i=0; i<4; ++i) //c b по b-8 перевели в BIN
+    {
+    qs.append(hextobin(str.at(b-1-(i*2)))); // Пр: 50,48,46...шаг=2
+    qs.append(hextobin(str.at(b-(i*2)))); // Пр: 51,49,47...шаг=2
+    }
+
+    qDebug()<<"QSSSSTRIEEEEE"<<qs;
+
+    /*=== Вычисляем S ===*/
+    if (realint(qs.at(31-31))==0) //Если 31 байт 0, тогда знак "+". Иначе "-" (Вычисляем S из FLOAT)
+
+         znak=1;
+
+    else znak=-1;
+
+    /*=== Вычисляем E ===*/
+    for (int i=0; i<8; ++i) //c 30 по 23 байт - вычисляем E из FLOAT
+   {
+    qsE.append(qs.at((31-30)+i)); //31-23 = 8 т.е. меняем направление счёта. Двигаемся справа налево <-|
+       qDebug()<<"qsE"<<qsE;
+    }
+
+    /*=== Вычисляем M ===*/
+    for (int i=0; i<=22; ++i) //c 22 по 0 байт - вычисляем M из FLOAT
+   {
+    qsM.append(qs.at((32-23)+i)); //Двигаемся справа налево <-|
+           qDebug()<<"qsM"<<qsM;
+   }
+
+    E=bintodec(qsE);
+    M=bintodec(qsM);
+               qDebug()<<"E"<<E;
+                          qDebug()<<"M"<<M;
+    F=znak*(qPow(2,E-127))*(1+(M/(qPow(2,23))));
+
+    qDebug()<<"FFFF"<<F;
+    return QString::number(F).toLatin1();
+}
+
+QString MainWindow::hextobin(QString hex) //конвертация из HEX в BIN
+{
+
+QString hexStr = "0123456789abcdef";
+QStringList List;
+
+List << "0000" << "0001" << "0010" << "0011" << "0100" << "0101" << "0110" << "0111" << "1000" << "1001" << "1010" << "1011" << "1100" << "1101" << "1110"<< "1111";
+
+
+
+    for (int i=0; i <= 15; ++i)
+    {
+        if (hex == hexStr.at(i))
+        {
+            hex.clear();
+        return List.at(i);
+        }
+    }
+}
+
+int MainWindow::realint(QString string) //переводим из QString "0" и "1" в Int (почему то .toint не поперло)
+{
+    if (string=="0") return 0;
+    else return 1;
+}
+
+int MainWindow::bintodec(QString bin) //переводим из BIN в DEC
+{
+
+int result=0;
+
+    for (int i=0; i < bin.length(); i++)
+    {
+
+            result=result+ (realint(bin.at(i))*qPow(2,((bin.length()-1)-i))); //значение бита * 2 в степени длина - 1
+    }
+
+return result;
+}
+
+void MainWindow::TimerTick() //тащим ProgressBar
+{
+
+
+    if( (ui->progressBar->value()) >= (ui->progressBar->maximum()))
+    {
+        ui->progressBar->setVisible(false);
+        ui->pushButton_getValue->setEnabled(true);
+        //timer2->stop();
+
+    }
+    else
+    {
+
+       ui->statusBar->showMessage("Идёт считывание");
+       ui->progressBar->setValue((ui->progressBar->value())+1);
+    }
+
+}
+
+void MainWindow::on_pushButton_2_clicked() //Кнопка About
+{
+    QMessageBox::about(0, "About", "Контроль-РХ Ver. 1.0 | ВНИИ <СПЕКТР> | 2015");
+}
+
+void MainWindow::on_pushButton_clicked()
+{
+    timer->start(500);
+    connect(timer,SIGNAL(timeout()), this, SLOT(Danger()));
+
+}
+
+void MainWindow::Danger()
+{
+   if (statusdanger==0)
+   {
+        ui->img_danger->setVisible(true);
+        statusdanger=1;
+   }
+   else
+   {
+       ui->img_danger->setVisible(false);
+       statusdanger=0;
+   }
+}
+
+//============================================================================================================
+//============================================================================================================
+//============================================== Метео =======================================================
+//============================================================================================================
+//============================================================================================================
+
+
+void MainWindow::on_radioButton_clicked() // Каждые 5 секунд
+{
+    QTimer* timermeteo = new QTimer;
+
+    if (serial->isOpen())
+    {
+        if (ui->radioButton->isChecked())
+        {
+            timermeteo->singleShot(5000, this, SLOT(on_pb_giveMeteo_clicked()));
+        }
+        else
+        {
+            timermeteo->stop();
+        }
+    }
+
+}
+
+
+
+void MainWindow::on_pb_giveMeteo_clicked()
+{
+
+   QByteArray getmeteo=QByteArray::fromHex("54524150018cc10c");
+
+   listhex.clear();
+   //serial->clear();
+
+   if (serial->isOpen())
+   {
+       serial->write(getmeteo,8);
+   }
+   //ui->te_meteo->setText(list);
+   timer->singleShot(1000, this, SLOT(parse_meteo()));
+
+
+
+}
+
+
+void MainWindow::parse_meteo()
+{
+
+   str.clear();
+   str=listhex.join("");
+
+   ui->te_meteo->clear();
+
+
+   int pos; //позиция бита заголовка
+
+
+   pos=24; //Для Dn
+   QString name="Мин. направление ветра";
+   if (str.mid(pos,6)=="446e3d") //Dn=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="44") //D
+              {
+                 ui->te_meteo->append(name + " "+ HexToAscii(str.mid(pos+6,6))+" [град]");
+              }
+              else
+              {
+                 ui->te_meteo->append(name + " - данные не получены");
+              }
+
+          }
+   }
+
+   pos=40; //Для Dm
+   name="Среднее направление ветра";
+   if (str.mid(pos,6)=="446d3d") //Dm=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="44") //D
+              {
+                  Dm = HexToAscii(str.mid(pos+6,6));
+                  ui->te_meteo->append(name+ " " + Dm+" [град]");
+              }
+              else
+              {
+                 ui->te_meteo->append(name + " - данные не получены");
+              }
+
+          }
+   }
+
+
+   pos=56; //Для Dx
+   name="Максимальное направление ветра";
+   if (str.mid(pos,6)=="44783d") //Dx=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="44") //D
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [град]");
+              }
+              else
+              {
+                 ui->te_meteo->append(name + " - данные не получены");
+              }
+
+          }
+   }
+
+   pos=72; //Для Sn
+   name="Минимальная скорость ветра";
+   if (str.mid(pos,6)=="536e3d") //Sn=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="4d") //М
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [м/с]");
+              }
+              if (str.mid(pos+12,2)=="4b") //K
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [км/ч]");
+              }
+              if (str.mid(pos+12,2)=="53") //S
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [миль/ч]");
+              }
+              if (str.mid(pos+12,2)=="4e") //N
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [узлов]");
+              }
+
+          }
+   }
+
+
+   pos=88; //Для Sm
+   name="Средняя скорость ветра";
+   if (str.mid(pos,6)=="536d3d") //Sm=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="4d") //М
+              {
+                 Sm = HexToAscii(str.mid(pos+6,6));
+                 ui->te_meteo->append(name + " " + Sm+" [м/с]");
+              }
+              if (str.mid(pos+12,2)=="4b") //K
+              {
+                 Sm = HexToAscii(str.mid(pos+6,6));
+                 ui->te_meteo->append(name + " " + Sm+" [км/ч]");
+              }
+              if (str.mid(pos+12,2)=="53") //S
+              {
+                 Sm = HexToAscii(str.mid(pos+6,6));
+                 ui->te_meteo->append(name + " " + Sm+" [миль/ч]");
+              }
+              if (str.mid(pos+12,2)=="4e") //N
+              {
+                 Sm = HexToAscii(str.mid(pos+6,6));
+                  ui->te_meteo->append(name + " " + Sm+" [узлов]");
+              }
+
+          }
+   }
+
+
+   pos=104; //Для Sx
+   name="Максимальная скорость ветра";
+   if (str.mid(pos,6)=="53783d") //Sx=
+   {
+          if (str.mid(pos+12,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+12,2)=="4d") //М
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [м/с]");
+              }
+              if (str.mid(pos+12,2)=="4b") //K
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [км/ч]");
+              }
+              if (str.mid(pos+12,2)=="53") //S
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [миль/ч]");
+              }
+              if (str.mid(pos+12,2)=="4e") //N
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,6))+" [узлов]");
+              }
+
+          }
+   }
+
+
+
+   pos=130; //Для Ta
+   qDebug()<<"pos"<<str.at(128);
+   qDebug()<<"pos"<<str.at(129);
+   qDebug()<<"pos"<<str.at(130);
+   qDebug()<<"pos"<<str.at(131);
+   qDebug()<<"pos"<<str.at(132);
+   name="Температура воздуха";
+   if (str.mid(pos,6)=="54613d") //Ta=
+   {
+       if(str.mid(pos+8,2)=="2e") //если вместо xx.x имеем формат температуры x.x, то вставляем в начало 0
+       {                        //чтобы счет байт не менялся в дальнейшем
+           str.insert(pos+6,"30");
+       }
+
+       if (str.mid(pos+14,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+14,2)=="43") //C
+              {
+                 Ta = HexToAscii(str.mid(pos+6,8));
+                 ui->te_meteo->append(name + " " + Ta+" [C]");
+              }
+              if (str.mid(pos+14,2)=="46") //F
+              {
+                 Ta = HexToAscii(str.mid(pos+6,8));
+                 ui->te_meteo->append(name + " " + Ta+" [F]");
+              }
+
+          }
+   }
+
+
+   pos=148; //Для Ua
+   name="Относительная влажность";
+   if (str.mid(pos,6)=="55613d") //Ua=
+   {
+
+       if(str.mid(pos+8,2)=="2e") //если вместо xx.x имеем формат x.x, то вставляем в начало 0
+       {                        //чтобы счет байт не менялся в дальнейшем
+           str.insert(pos+6,"30");
+       }
+
+       if (str.mid(pos+14,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+14,2)=="50") //P
+              {
+                 Ua = HexToAscii(str.mid(pos+6,8));
+                 ui->te_meteo->append(name + " " + Ua+" [%]");
+              }
+              else
+              {
+                 ui->te_meteo->append(name + " - данные не получены");
+              }
+
+          }
+   }
+
+   pos=166; //Для Pa
+   name="Атмосферное давление";
+   if (str.mid(pos,6)=="50613d") //Pa=
+   {
+       if(str.mid(pos+8,2)=="2e") //если вместо xxx.x имеем формат x.x, то вставляем в начало 0
+       {                        //чтобы счет байт не менялся в дальнейшем
+           str.insert(pos+6,"3030");
+       }
+
+       if (str.mid(pos+14,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+16,2)=="48") //H
+              {
+                 Pa = HexToAscii(str.mid(pos+6,10));
+                 ui->te_meteo->append(name + " " + Pa+" [гПа]");
+              }
+              if (str.mid(pos+16,2)=="50") //P
+              {
+                 Pa = HexToAscii(str.mid(pos+6,10));
+                 ui->te_meteo->append(name + " " + Pa+" [Па]");
+              }
+              if (str.mid(pos+16,2)=="42") //B
+              {
+                 Pa = HexToAscii(str.mid(pos+6,10));
+                 ui->te_meteo->append(name + " " + Pa+" [бар]");
+              }
+              if (str.mid(pos+16,2)=="4d") //M
+              {
+                 Pa = Pa = HexToAscii(str.mid(pos+6,10));
+                 ui->te_meteo->append(name + " " + Pa+" [мм.рт.ст.]");
+              }
+              if (str.mid(pos+16,2)=="49") //I
+              {
+                 Pa = HexToAscii(str.mid(pos+6,10));
+                 ui->te_meteo->append(name + " " + Pa+" [дюймы рт.ст.]");
+              }
+
+          }
+   }
+
+
+   pos=196; //Для Rc
+   name="Накопление дождя";
+   if (str.mid(pos,6)=="52633d") //Rc=
+   {
+          if (str.mid(pos+14,2)=="23") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (str.mid(pos+14,2)=="4d") //M
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,8))+" [мм]");
+              }
+              if (str.mid(pos+14,2)=="49") //I
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(pos+6,8))+" [дюймы]");
+              }
+
+          }
+   }
+
+
+
+
+
+
+
+   name="Интенсивность дождя";
+   QRegExp Ri("52693d"); //для Ri
+   QRegExp zpt("2c"); //для запятой
+   QRegExp Octotorp("23"); //для #
+   QRegExp Ravno("3d"); //для =
+   QRegExp M("4d"); //для M
+   QRegExp I("49"); //для I
+   int poszpt, len, posravno;
+
+
+   if (Ri.indexIn(str)>0) //Ri=
+   {
+       pos=Ri.indexIn(str);
+       poszpt = zpt.indexIn(str,pos);
+       posravno = Ravno.indexIn(str,pos);
+       len=poszpt-pos; //длина "куска" строки
+
+       if (Octotorp.indexIn(str.mid(pos,len))>0) //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (M.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [мм/ч]");
+              }
+              if (I.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [дюйм/ч]");
+              }
+
+          }
+   }
+
+
+
+
+
+   name="Накопление града";
+   QRegExp Hc("48633d"); //для Hc
+   QRegExp H("48"); //для H
+
+
+   if (Hc.indexIn(str)>0) //Ri=
+   {
+       pos=Hc.indexIn(str);
+       poszpt = zpt.indexIn(str,pos);
+       posravno = Ravno.indexIn(str,pos);
+       len=poszpt-pos; //длина "куска" строки
+
+       if (Octotorp.indexIn(str.mid(pos,len))>0) //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (M.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [удары/см2]");
+              }
+              if (I.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [удары/дюйм2]");
+              }
+              if (H.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [удары]");
+              }
+
+          }
+   }
+
+
+
+   name="Продолжительность града";
+   QRegExp Hd("48643d"); //для Hd
+   QRegExp S("73"); //для s
+
+
+   if (Hd.indexIn(str)>0) //Hd=
+   {
+       pos=Hd.indexIn(str);
+       poszpt = zpt.indexIn(str,pos);
+       posravno = Ravno.indexIn(str,pos);
+       len=poszpt-pos; //длина "куска" строки
+
+       if (Octotorp.indexIn(str.mid(pos,len))>0) //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+              if (S.indexIn(str.mid(pos,poszpt-pos))>0)
+              {
+                 ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,(poszpt-2)-(posravno+2)))+" [с]");
+              }
+
+
+          }
+   }
+
+
+
+   name="Интенсивность града"; //изменена конструкция парсинга!!!
+   QRegExp Hi("48693d"); //для Hi
+
+
+   if (Hi.indexIn(str)>0) //Hi=
+   {
+       pos=Hi.indexIn(str);
+       poszpt = zpt.indexIn(str,pos);
+       posravno = Ravno.indexIn(str,pos);
+       len=poszpt-pos; //длина "куска" строки
+
+
+
+       if (Octotorp.indexIn(str.mid(pos,len))>0 && str.mid(((Octotorp.indexIn(str.mid(pos,len)))+2),2)=="2c") //#
+          {
+             ui->te_meteo->append(name + " - недопустимые данные");
+          }
+          else
+          {
+           if (M.indexIn(str.mid(pos,poszpt-pos))>0)
+           {
+              //от = до первой буквы - это и есть значения
+              ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,6))+" [удары/см2ч]");
+           }
+           if (I.indexIn(str.mid(pos,poszpt-pos))>0)
+           {
+              ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,6))+" [удары/дюйм2ч]");
+           }
+           if (H.indexIn(str.mid(pos,poszpt-pos))>0)
+           {
+              ui->te_meteo->append(name + " " + HexToAscii(str.mid(Ravno.indexIn(str,pos)+2,6))+" [удары/ч]");
+           }
+
+          }
+   }
+
+
+   if (ui->cb_automode->isChecked())
+   {
+       SQLMeteo(); // пашем результаты в базу
+   }
+
+}
+
+
+QString MainWindow::HexToAscii(QString String)
+{
+    QByteArray ByteArray1=String.toUtf8();
+    const char* chArr1=ByteArray1.constData();
+
+    QByteArray ByteArray2=QByteArray::fromHex(chArr1);
+    const char* chArr2=ByteArray2.constData();
+
+    return QString::fromUtf8(chArr2);
+}
+
+
+//============================================================================================
+//============================================================================================
+//============================= GPS-датчик ===================================================
+//============================================================================================
+//============================================================================================
+
+
+void MainWindow::on_pb_opportgps_clicked() //кнопка открыть порт-GPS
+{
+
+
+    sum.clear();
+    port = new QSerialPort(this);
+    port->close();
+    port->setPortName(ui->cb_gpscomport->currentText());
+    port->setBaudRate(QSerialPort::Baud4800);
+    port->setDataBits(QSerialPort::Data8);
+    port->setParity(QSerialPort::NoParity);
+    port->setStopBits(QSerialPort::OneStop);
+    port->setFlowControl(QSerialPort::NoFlowControl);
+    if (port->open(QIODevice::ReadWrite))
+    {
+
+        qDebug()<< "COMPORT OPEN!";
+        ui->statusBar->showMessage("Порт GPS открыт");
+        portOpenStyleGPS();
+        connect (port,SIGNAL(readyRead()),this,SLOT(ReadAll()));
+
+    }
+    else
+    {
+        for (int i=0;i<5;i++) //делаем ещё 5 попыток
+        {
+            qDebug()<< "SHOULD OPEN";
+               if (port->open(QIODevice::ReadWrite))
+               {
+                   i=5;
+                   qDebug()<< "COMPORT OPEN!";
+                   ui->statusBar->showMessage("Порт GPS открыт");
+                   portOpenStyleGPS();
+               }
+               else
+               {
+                   ui->statusBar->showMessage("Не удалось открыть GPS-порт");
+                   qDebug()<<"COMPORT CLOSE!";
+               }
+        }
+
+    }
+
+}
+
+void MainWindow::ReadAll ()
+{
+
+    QByteArray ba;
+    QString gps;
+    ba=port->readAll();
+    sum.append(ba);
+
+    qDebug()<<"OXOXO"<<sum;
+
+    QRegExp reg1("RMC");
+    QRegExp reg2("VTG");
+
+    if (sum.contains(reg1)==true)
+    {
+        qDebug()<<"PERVBI"<<reg1.indexIn(sum);
+        sum.remove(0,reg1.indexIn(sum));
+        if (sum.contains(reg2)==true)
+        {
+                    qDebug()<<"VTOROI"<<reg2.indexIn(sum);
+            if ((reg2.indexIn(sum))>(reg1.indexIn(sum))) //если $GPVTG после $GNRMC
+            {
+                qDebug()<<sum;
+                //ui->textEdit_2->clear();
+                int a=reg1.indexIn(sum)-2;
+                int b=reg2.indexIn(sum);
+                parse_gps(gps=sum.mid(a,(b-a)-3));
+                qDebug()<<"MID"<<gps;
+                //ui->textEdit_2->setText(gps);
+             }
+
+         }
+    }
+    else
+    {
+
+    }
+}
+
+void MainWindow::parse_gps(QString gps) //парсим GPS строчку
+{
+
+    QRegExp zpt("[,]");
+    QStringList bl;
+    QString dolg1,dolg2;
+    ui->textEdit_2->append("");
+    ui->textEdit_2->append("===================================================");
+    ui->textEdit_2->append(gps);
+
+    for (int i=0;i<13;i++) //
+    {
+        bl.append(gps.left(zpt.indexIn(gps)));
+        gps.remove(0,zpt.indexIn(gps)+1);
+        qDebug()<<"!!!Block's!!!"<<bl;
+
+        switch (i)
+        {
+
+        case 0:
+            if (bl.at(i)=="GNRMC")
+            {
+                  ui->textEdit_2->append("Cпутниковая система - GNSS");
+            }
+            if (bl.at(i)=="GPRMC")
+            {
+                  ui->textEdit_2->append("Cпутниковая система - GPS");
+            }
+            if (bl.at(i)=="GLRMC")
+            {
+                  ui->textEdit_2->append("Cпутниковая система - GPS");
+            }
+            if (bl.at(i)=="GARMC")
+            {
+                  ui->textEdit_2->append("Cпутниковая система - Галилео");
+            }
+            break;
+
+
+        case 1:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Время (по Гринвичу) - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Время (по Гринвичу) - " + bl.at(i).mid(0,2)+":"+bl.at(i).mid(2,2)+":"+ bl.at(i).mid(4,2));
+            }
+
+            break;
+
+
+
+        case 2:
+
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("О достоверности данных неизвестно");
+            }
+            else
+            {
+
+                if ((bl.at(i).mid(0,1)==QString::fromLocal8Bit("A")))
+                {
+                    ui->textEdit_2->append("Данные достоверны. Флаг "+bl.at(i).mid(0,1));
+                }
+                if ((bl.at(i).mid(0,1)==QString::fromLocal8Bit("V")))
+                {
+                    ui->textEdit_2->append("Данные недостоверны. Флаг "+bl.at(i).mid(0,1));
+                }
+            }
+            break;
+
+
+        case 3:
+
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Широта, градусы и минуты - данные неизвестны");
+            }
+            else
+                ui->textEdit_2->append("Широта - "+bl.at(i).mid(0,2)+" градус и "+bl.at(i).mid(2,7)+" минут");
+            dolg1=bl.at(i).mid(0,2)+"."+bl.at(i).mid(2,7);
+
+            //удаляем точку на 4 или 5 знакоместе
+            if (dolg1.mid(4,1)=="." )
+            {
+                dolg1.remove(4,1);
+            }
+            if (dolg1.mid(5,1)=="." )
+            {
+                dolg1.remove(5,1);
+            }
+            latitude = QString::number(dolg1.toFloat()) ; //передаем в глобальную (-4 - адаптация для карты Курска)
+            break;
+
+
+        case 4:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Полушарие (северное/южное) - данные неизвестны");
+            }
+            else
+            {
+                if (bl.at(i)=="N")
+                {
+                    ui->textEdit_2->append("Полушарие - Северное");
+                }
+                if (bl.at(i)=="S")
+                {
+                    ui->textEdit_2->append("Полушарие - Южное");
+                }
+            }
+            break;
+
+
+        case 5:
+
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Долгота, градусы и минуты - данные неизвестны");
+            }
+            else
+                ui->textEdit_2->append("Долгота - "+bl.at(i).mid(0,3)+" градус и "+bl.at(i).mid(3,7)+" минут");
+            dolg2=bl.at(i).mid(0,3)+"."+bl.at(i).mid(3,7);
+
+            //удаляем точку на 5 или 6 знакоместе
+            if (dolg2.mid(5,1)=="." )
+            {
+                dolg2.remove(5,1);
+            }
+            if (dolg2.mid(6,1)=="." )
+            {
+                dolg2.remove(6,1);
+            }
+            longitude = QString::number(dolg2.toFloat()); //передаем в глобальную (-3 - адаптация для карты Курска)
+            break;
+
+
+        case 6:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Полушарие (западное/восточное) - данные неизвестны");
+            }
+            else
+            {
+                if (bl.at(i)=="E")
+                {
+                    ui->textEdit_2->append("Полушарие - Западное");
+                }
+                if (bl.at(i)=="W")
+                {
+                    ui->textEdit_2->append("Полушарие - Восточное");
+                }
+            }
+            break;
+
+
+        case 7:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Скорость (узлов) - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Скорость - "+bl.at(i)+" узлов");
+                ui->textEdit_2->append("Скорость - "+QString::number(bl.at(i).toInt()*1.85)+" [км/ч]");
+            }
+            break;
+
+
+        case 8:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Курс над землей (град.) - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Курс над землей - "+bl.at(i)+" градусов");
+            }
+            if (bl.at(i)==0)
+            {
+                ui->textEdit_2->append("Курс над землей - "+bl.at(i)+" градусов. Движение строго на север");
+            }
+            break;
+        case 9:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Дата - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Дата - "+bl.at(i).mid(0,2)+"."+bl.at(i).mid(2,2)+"."+bl.at(i).mid(4,2));
+            }
+            break;
+
+
+        case 10:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Магнитное склонение - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Магнитное склонение - "+bl.at(i));
+            }
+            break;
+        case 11:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Направление магнитного склонения - данные неизвестны");
+            }
+            else
+            {
+                ui->textEdit_2->append("Направление магнитного склонения - "+bl.at(i));
+            }
+            break;
+
+
+        case 12:
+            if (bl.at(i)=="" && bl.at(i).length()==0)
+            {
+                ui->textEdit_2->append("Режим  - данные неизвестны");
+            }
+            else
+            {
+                if (bl.at(i).left(1)=="m")
+                {
+                    ui->textEdit_2->append("Режим - навигации");
+                }
+                if (bl.at(i).left(1)=="N")
+                {
+                    ui->textEdit_2->append("Режим - недостоверные данные");
+                }
+                if (bl.at(i).left(1)=="A")
+                {
+                    ui->textEdit_2->append("Режим - автономный");
+                }
+                if (bl.at(i).left(1)=="D")
+                {
+                    ui->textEdit_2->append("Режим - дифференциальный");
+                }
+            }
+            break;
+
+
+        default:
+            break;
+
+        }
+    }
+
+    ui->textEdit_2->append("Result: "+dolg1+", "+dolg2);
+    ui->textEdit_2->append("===================================================");
+    ui->textEdit_2->append("");
+
+
+    if (ui->cb_automode->isChecked())
+    {
+        SQLGPS();
+    }
+
+    port->clear();
+    port->close();
+    sum.clear();
+}
+
+
+void MainWindow::Readyread() // порт инициализоран. Просто читаем
+{
+    if (port->open(QIODevice::ReadWrite))
+    {
+
+        qDebug()<< "COMPORT OPEN!";
+        connect (port,SIGNAL(readyRead()),this,SLOT(ReadAll()));
+
+    }
+    /*
+    else
+    {
+        ui->statusBar->showMessage("Не удалось получить доступ к порту");
+    }
+    */
+}
+
+void MainWindow::on_pb_clportgps_clicked()  //кнопка "Закрыть порт"
+{
+    port->close();
+    portCloseStyleGPS();
+    timer->stop();
+    ui->statusBar->showMessage("GPS-порт закрыт");
+}
+
+
+
+void MainWindow::on_pb_givegps_clicked() //кнопка "Получить координаты"
+{
+    if (port->open(QIODevice::ReadWrite))
+    {
+        connect(port, SIGNAL(readyRead()), this, SLOT(ReadAll()));
+        ui->statusBar->showMessage("Получить координаты");
+    }
+    else
+    {
+        ui->statusBar->showMessage("Не удалось получить доступ к порту");
+    }
+
+}
+
+void MainWindow::on_cb_everysecond_clicked()
+{
+
+    if (ui->cb_everysecond->isChecked())
+    {
+        disconnect(timer,SIGNAL(timeout()),this,SLOT(Readyread()));
+        ui->pb_givegps->setEnabled(false);
+        timer->start(5000);
+        connect(timer,SIGNAL(timeout()),this,SLOT(Readyread()));
+
+    }
+    else
+    {
+        timer->stop();
+        ui->pb_givegps->setEnabled(true);
+    }
+}
+
+
+void MainWindow::portCloseStyleGPS() // описание стиля закрытого GPS-порта
+{
+    ui->pb_opportgps->setVisible(true);
+    // С вкладки GPS-модуля убираем...
+    ui->pb_clportgps->setVisible(false); //убираем "закрыть порт"
+    ui->pb_givegps->setVisible(false); // убираем "Получить данные"
+    ui->cb_everysecond->setVisible(false); // убираем "Каждую секунду"
+    ui->textEdit_2->clear();
+    ui->cb_everysecond->setChecked(false);
+}
+
+void MainWindow::portOpenStyleGPS() // описание стиля открытого GPS-порта
+{
+    ui->pb_opportgps->setVisible(false);
+    ui->pb_clportgps->setVisible(true);
+    ui->pb_givegps->setVisible(true);
+    ui->cb_everysecond->setVisible(true);
+}
+
+
+
+void MainWindow::on_cb_visibleTeGPS_clicked()
+{
+    if(ui->cb_visibleTeGPS->isChecked())
+    {
+        ui->textEdit_2->setHidden(true);
+    }
+    else
+    {
+        ui->textEdit_2->setHidden(false);
+    }
+}
+
+
+//============================================================================================
+//============================================================================================
+//============================= Database =====================================================
+//============================================================================================
+//============================================================================================
+
+bool MainWindow::SQLBDHK() // Запись в базу с датчиков с БДХК
+{
+    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC");
+
+    db.setDatabaseName("BDHK");
+    if (!db.open())
+    {
+        qDebug()<<"DB NOT OPEN!!!"<<db.lastError();
+        ui->statusBar->showMessage("Не удалось открыть базу данных");
+        return false;
+    }
+    else
+    {
+        QStringList dbtables = db.tables();
+        ui->statusBar->showMessage("База данных открыта");
+
+        foreach (QString str, dbtables)
+        {
+            qDebug()<<"Tables:"<<str;
+            //ui->textEdit_3->append(str);
+        }
+
+
+        // Тестовые значения
+
+        gHp10 = "0.35";
+        gMetan = "0.36";
+        gFtvk = "0.36";
+        gMonoYgl = "0.38";
+        gSerVod = "0.39";
+        gHlor = "0.40";
+        gGeksan =  "0.41";
+        gOksSer = "0.42";
+        gOksAzot = "0.43";
+        gSolKisl =  "0.44";
+        gPropan =  "0.45";
+        gAmmiak =  "0.46";
+        gYglGaz = "0.47";
+        gGB =  "0.48";
+        gHD =  "0.49";
+        gHCN =  "0.50";
+        gH2CO = "0.51";
+
+        // _Тестовые значения
+
+
+        // Ищем таблицу Measurement и пишем туда данные
+        for (int a; a < dbtables.length(); a++)
+            {
+                if (dbtables.at(a)=="Measurement")
+                {
+
+
+                    //вычисяем дату и время
+
+                    QTime time;
+                    QString strTime;
+                    QDate date;
+                    QString strDate;
+
+                    time = QTime::currentTime();
+                    strTime = time.toString("hh:mm:ss");
+                    date = QDate::currentDate();
+                    strDate = date.toString("yyyy-MM-dd");
+
+                    qDebug() << "strTime" << strTime;
+                    qDebug() << "strDate" << strDate;
+
+
+                    // пишем в таблицу Measurement
+                    QSqlQuery query;
+
+                    ui->statusBar->showMessage("Таблица Measurement найдена. Работаем...");
+
+
+
+                    query.prepare("INSERT INTO Measurement (DeviceSensorId, DateTime, Value)"
+                                  "VALUES(:DeviceSensorId, :DateTime, :Value);");
+
+
+                    int DSID_HP10 = 72; // DeviceSensorID - Уникальный идентификатор записи в таблице DeviceSensor (внешний ключ)
+                    int DSID_Metan = 65;
+                    int DSID_Ftvk = 73;
+                    int DSID_MonoYgl = 54;
+                    int DSID_SerVod = 58;
+                    int DSID_Hlor = 61;
+                    int DSID_Geksan = 68;
+                    int DSID_OksSer = 59;
+                    int DSID_OksAzot = 74;
+                    int DSID_SolKisl = 52;
+                    int DSID_Propan = 67;
+                    int DSID_Ammiak = 64;
+                    int DSID_YglGaz = 57;
+                    int DSID_GB = 71;
+                    int DSID_HD = 70;
+                    int DSID_HCN = 69;
+                    int DSID_H2CO = 63;
+
+
+
+                    // Hp10
+
+                    query.bindValue(":DateTime", strDate + " " + strTime);
+                    query.bindValue(":DeviceSensorId", DSID_HP10);
+                    query.bindValue(":Value", gHp10); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Hp10)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Hp10) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement) успешно выполнен");
+                    }
+
+
+
+                    // Метан - CH4
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Metan );
+                    query.bindValue( ":Value", gMetan ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Метан - CH4)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Метан - CH4)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Метан - CH4) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Метан - CH4) успешно выполнен");
+                    }
+
+
+                    // Фтороводород - HF
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Ftvk );
+                    query.bindValue( ":Value", gFtvk ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Фтороводород - HF)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Фтороводород - HF)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Фтороводород - HF) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Фтороводород - HF) успешно выполнен");
+                    }
+
+
+                    // Моноксид углерода - CO
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_MonoYgl );
+                    query.bindValue( ":Value", gMonoYgl ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Моноксид углерода - CO)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Моноксид углерода - CO)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Моноксид углерода - CO) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Моноксид углерода - CO) успешно выполнен");
+                    }
+
+
+                    // Сероводород - H2S
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_SerVod );
+                    query.bindValue( ":Value", gSerVod ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Сероводород - H2S)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Сероводород - H2S)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Сероводород - H2S) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Сероводород - H2S) успешно выполнен");
+                    }
+
+
+                    // Хлор - Cl
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Hlor );
+                    query.bindValue( ":Value", gHlor ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Хлор - Cl)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Хлор - Cl)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Хлор - Cl) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Хлор - Cl) успешно выполнен");
+                    }
+
+
+
+                    // Гексан - C6H14
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Geksan );
+                    query.bindValue( ":Value", gGeksan ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Гексан - C6H14)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Гексан - C6H14)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Гексан - C6H14) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Гексан - C6H14) успешно выполнен");
+                    }
+
+
+
+                    // Оксид Серы - SO2
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_OksSer );
+                    query.bindValue( ":Value", gOksSer ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Оксид Серы - SO2)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Оксид Серы - SO2)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Оксид Серы - SO2) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Оксид Серы - SO2) успешно выполнен");
+                    }
+
+
+
+                    // Оксид Азота - NO2
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_OksAzot );
+                    query.bindValue( ":Value", gOksAzot ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Оксид Азота - NO2)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Оксид Азота - NO2)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Оксид Азота - NO2) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Оксид Азота - NO2) успешно выполнен");
+                    }
+
+
+
+                    // Соляная кислота - HCl
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_SolKisl );
+                    query.bindValue( ":Value", gSolKisl ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Соляная кислота - HCl)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Соляная кислота - HCl)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Соляная кислота - HCl) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Соляная кислота - HCl) успешно выполнен");
+                    }
+
+
+
+                    // Пропан - C3H8
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Propan );
+                    query.bindValue( ":Value", gPropan ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Пропан - C3H8)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Пропан - C3H8)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Пропан - C3H8) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Пропан - C3H8) успешно выполнен");
+                    }
+
+
+
+                    // Аммиак - NH3
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Ammiak );
+                    query.bindValue( ":Value", gAmmiak ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Аммиак - NH3)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Аммиак - NH3)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Аммиак - NH3) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Аммиак - NH3) успешно выполнен");
+                    }
+
+
+
+                    // Углекислый газ - CO2
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_YglGaz );
+                    query.bindValue( ":Value", gYglGaz ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Углекислый газ - CO2)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Углекислый газ - CO2)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Углекислый газ - CO2) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Углекислый газ - CO2) успешно выполнен");
+                    }
+
+
+
+                    // Иприт - GB
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_GB );
+                    query.bindValue( ":Value", gGB ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Иприт - GB)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Иприт - GB)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Иприт - GB) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Иприт - GB) успешно выполнен");
+                    }
+
+
+
+                    // Зарин - HD
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_HD );
+                    query.bindValue( ":Value", gHD ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Зарин - HD)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Зарин - HD)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Зарин - HD) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Зарин - HD) успешно выполнен");
+                    }
+
+
+
+                    // Соляная кислота - HCN
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_HCN );
+                    query.bindValue( ":Value", gHCN ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Соляная кислота - HCN)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Соляная кислота - HCN)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Соляная кислота - HCN) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Соляная кислота - HCN) успешно выполнен");
+                    }
+
+
+                    // Формальдегид - H2CO
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_H2CO );
+                    query.bindValue( ":Value", gH2CO ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Формальдегид - H2CO)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Формальдегид - H2CO)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Формальдегид - H2CO) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Формальдегид - H2CO) успешно выполнен");
+                    }
+                }
+            }
+
+
+/*
+        QSqlQuery query;
+        QSqlRecord rec = query.record();
+        QString name;
+
+
+        while(query.next()){
+            name = query.value(rec.indexOf("number")).toString();
+        }
+
+        qDebug()<<"READ RESULT: "<<name;
+
+        return true;
+*/
+
+    }
+
+}
+
+
+bool MainWindow::SQLGPS() //запись в базу для GPS
+{
+    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC");
+
+    db.setDatabaseName("BDHK");
+    if (!db.open())
+    {
+        qDebug()<<"DB NOT OPEN!!!"<<db.lastError();
+        ui->statusBar->showMessage("Не удалось открыть базу данных");
+        return false;
+    }
+    else
+    {
+        QStringList dbtables = db.tables();
+        ui->statusBar->showMessage("База данных открыта");
+
+        foreach (QString str, dbtables)
+        {
+            qDebug()<<"Tables:"<<str;
+        }
+
+
+
+        // Ищем таблицу DeviceLocation и пишем туда GPS
+        for (int a; a < dbtables.length(); a++)
+            {
+                if (dbtables.at(a)=="DeviceLocation")
+                {
+                    //вычисяем дату и время
+                    QTime time;
+                    QString strTime;
+                    QDate date;
+                    QString strDate;
+
+                    time = QTime::currentTime();
+                    strTime = time.toString("hh:mm:ss");
+                    date = QDate::currentDate();
+                    strDate = date.toString("yyyyMMdd");
+
+                    qDebug() << "strTime" << strTime;
+                    qDebug() << "strDate" << strDate;
+
+
+                    // пишем в таблицу DeviceLocation
+                    QSqlQuery query;
+
+                    ui->statusBar->showMessage("Таблица DeviceLocation найдена. Работаем...");
+
+                    query.prepare("INSERT INTO DeviceLocation (DateTime, DeviceId, DeviceLocationObjectId, Latitude, LocationDescription, Longitude)"
+                                  "VALUES(:DateTime, :DeviceId, :DeviceLocationObjectId, :Latitude, :LocationDescription, :Longitude);");
+
+                    query.bindValue(":DateTime", strDate + " " + strTime);
+                    query.bindValue(":DeviceId", "24");
+                    query.bindValue(":Latitude", latitude ); //глобальная var с блока GPS
+                    query.bindValue(":Longitude", longitude); //глобальная var с блока GPS
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (DeviceLocation)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (DeviceLocation)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (DeviceLocation) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (DeviceLocation) успешно выполнен");
+                    }
+
+                 }
+            }
+
+    }
+}
+
+
+bool MainWindow::SQLMeteo() // Запись в базу с метео
+{
+    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC");
+
+    db.setDatabaseName("BDHK");
+    if (!db.open())
+    {
+        qDebug()<<"DB NOT OPEN!!!"<<db.lastError();
+        ui->statusBar->showMessage("Не удалось открыть базу данных");
+        return false;
+    }
+    else
+    {
+        QStringList dbtables = db.tables();
+        ui->statusBar->showMessage("База данных открыта");
+
+        foreach (QString str, dbtables)
+        {
+            qDebug()<<"Tables:"<<str;
+            //ui->textEdit_3->append(str);
+        }
+
+
+        // Ищем таблицу Measurement и пишем туда данные
+        for (int a; a < dbtables.length(); a++)
+            {
+                if (dbtables.at(a)=="Measurement")
+                {
+
+
+                    //вычисяем дату и время
+
+                    QTime time;
+                    QString strTime;
+                    QDate date;
+                    QString strDate;
+
+                    time = QTime::currentTime();
+                    strTime = time.toString("hh:mm:ss");
+                    date = QDate::currentDate();
+                    strDate = date.toString("yyyy-MM-dd");
+
+                    qDebug() << "strTime" << strTime;
+                    qDebug() << "strDate" << strDate;
+
+
+                    // пишем в таблицу Measurement
+                    QSqlQuery query;
+
+                    ui->statusBar->showMessage("Таблица Measurement найдена. Работаем...");
+
+
+
+                    query.prepare("INSERT INTO Measurement (DeviceSensorId, DateTime, Value)"
+                                  "VALUES(:DeviceSensorId, :DateTime, :Value);");
+
+
+                    int DSID_Sm = 75; // DeviceSensorID - Уникальный идентификатор записи в таблице DeviceSensor
+                    int DSID_Dm = 76;
+                    int DSID_Pa = 77;
+                    int DSID_Ta = 78;
+                    int DSID_Ua = 79;
+
+
+                    // Sm - Скорость ветра
+
+                    query.bindValue(":DateTime", strDate + " " + strTime);
+                    query.bindValue(":DeviceSensorId", DSID_Sm);
+                    query.bindValue(":Value", Sm); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Sm - Скорость ветра)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Sm - Скорость ветра)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Sm - Скорость ветра) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Sm - Скорость ветра) успешно выполнен");
+                    }
+
+
+
+                    // Dm - Направление ветра
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Dm );
+                    query.bindValue( ":Value", Dm ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Dm - Направление ветра)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Dm - Направление ветра)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Dm - Направление ветра) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Dm - Направление ветра) успешно выполнен");
+                    }
+
+
+                    // Pa - Атмосферное давление
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Pa );
+                    query.bindValue( ":Value", Pa ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Pa - Атмосферное давление)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Pa - Атмосферное давление)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Pa - Атмосферное давление) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Pa - Атмосферное давление) успешно выполнен");
+                    }
+
+
+                    // Ta - Температура воздуха
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Ta );
+                    query.bindValue( ":Value", Ta ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Ta - Температура воздуха)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Ta - Температура воздуха)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Ta - Температура воздуха) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Ta - Температура воздуха) успешно выполнен");
+                    }
+
+
+                    // Ua - Относительная влажность
+
+
+                    query.bindValue( ":DateTime", strDate + " " + strTime );
+                    query.bindValue( ":DeviceSensorId", DSID_Ua );
+                    query.bindValue( ":Value", Ua ); //глобальная var
+
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "Не удалось выполнить запрос к SQL (Measurement - Ua - Относительная влажность)";
+                        ui->statusBar->showMessage("Не удалось выполнить запрос к SQL (Measurement - Ua - Относительная влажность)");
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "Запрос к SQL (Measurement - Ua - Относительная влажность) успешно выполнен";
+                        ui->statusBar->showMessage("Запрос к SQL (Measurement - Ua - Относительная влажность) успешно выполнен");
+                    }
+                }
+            }
+
+    }
+
+}
+
+
+void MainWindow::testconnect()
+{
+    QSqlDatabase db = QSqlDatabase::addDatabase("QODBC");
+
+    db.setDatabaseName("BDHK");
+    if (!db.open())
+    {
+        qDebug()<<"DB NOT OPEN!!!"<<db.lastError();
+        ui->statusBar->showMessage("Не удалось открыть базу данных");
+
+    }
+    else
+    {
+        QStringList dbtables = db.tables();
+        ui->statusBar->showMessage("База данных открыта");
+
+        foreach (QString str, dbtables)
+        {
+            qDebug()<<"Tables:"<<str;
+
+        }
+
+
+
+        // Ищем таблицу Measurement и пишем туда данные
+        for (int a; a < dbtables.length(); a++)
+            {
+                if (dbtables.at(a)=="DeviceLocation")
+                {
+
+
+
+                    QSqlQuery query;
+
+
+
+
+                    query.prepare("INSERT INTO DeviceLocation (DeviceId, DateTime, Latitude, Longitude, LocationDescription, DeviceLocationObjectId)"
+                                  "VALUES(:DeviceId, :DateTime, :Latitude, :Longitude, :LocationDescription, :DeviceLocationObjectId);");
+
+
+
+                    query.bindValue(":DeviceId", 13);
+                    //query.bindValue(":DateTime", "2015.06.22");
+                    query.bindValue(":Latitude", 00.000000);
+                    query.bindValue(":Longitude", 00.000000);
+
+                    if (!query.exec())
+                    {
+                        qDebug() << "LOSE";
+                        qDebug() << query.lastError();
+                    }
+                    else
+                    {
+                        qDebug() << "YEAH!";
+                    }
+
+                }
+            }
+    }
+
+}
+
+void MainWindow::on_pb_openBD_clicked()
+{
+    //SQLConnection();
+    //testconnect();
+}
+
+
+//====================================================================================================================
+//====================================================================================================================
+//=============================  БК РХО ==============================================================================
+//====================================================================================================================
+//====================================================================================================================
+
+
+void MainWindow::on_pb_openportkrxo_clicked()
+{
+
+    portkrxo = new QSerialPort(this);
+    portkrxo->close();
+    portkrxo->setPortName(ui->cb_portkrxo->currentText());
+    portkrxo->setBaudRate(QSerialPort::Baud4800);
+    portkrxo->setDataBits(QSerialPort::Data8);
+    portkrxo->setParity(QSerialPort::NoParity);
+    portkrxo->setStopBits(QSerialPort::OneStop);
+    portkrxo->setFlowControl(QSerialPort::NoFlowControl);
+    if (portkrxo->open(QIODevice::ReadWrite))
+    {
+
+        qDebug()<< "COMPORT KRXO OPEN!";
+        connect (portkrxo,SIGNAL(readyRead()),this,SLOT(Readkrxo()));
+        ui->pb_openportkrxo->setEnabled(false);
+        ui->pb_closeportkrxo->setEnabled(true);
+        ui->le_countkrxo->setEnabled(true);
+        ui->spinBox->setEnabled(false);
+        ui->statusBar->showMessage("Порт БР АСКРХО открыт!");
+
+    }
+    else
+    {
+        qDebug()<<"COMPORT CLOSE!";
+
+    }
+
+
+}
+
+void MainWindow::Readkrxo()
+{
+    QString readport;
+    readport=portkrxo->readAll().toHex();
+    qDebug()<<"P"<<readport;
+    emit read(readport);
+}
+
+
+void MainWindow::parse_rxo(QString data)
+{
+
+    bool ok;
+    readkrxo.append(data);
+
+    qDebug()<<"DATA:"<<readkrxo;
+
+    qDebug()<<"DATA:lenght"<<readkrxo.length();
+
+    if (readkrxo.length()==62 && readkrxo.endsWith("02")) //запрос параметров. Команда 0х02
+    {
+        rec = readkrxo.mid(readkrxo.length()-10,2) + readkrxo.mid(readkrxo.length()-12,2);
+        ui->le_countkrxo->setText(QString::number(rec.toInt(&ok, 16)));
+    }
+
+    if (readkrxo.length()==230 && readkrxo.startsWith("5452415064")) //запрос результатов. Команда 09 & 03
+    {
+        //qDebug() << "WE NO SPEAK" << readkrxo.mid(210,8);
+        //qDebug() << "FLOAT CRACK" <<FormatText(IEEE754forKRXO(readkrxo.mid(210,8),7));
+
+        ui->le_krxoammiak->setText(FormatText(IEEE754forKRXO(readkrxo.mid(186,8),7)) + " [мг/м3]");
+        ui->le_krxochlor->setText(FormatText(IEEE754forKRXO(readkrxo.mid(194,8),7)) + " [мг/м3]");
+        ui->le_krxodioksser->setText(FormatText(IEEE754forKRXO(readkrxo.mid(202,8),7)) + " [мг/м3]");
+        ui->le_krxodioksazota->setText(FormatText(IEEE754forKRXO(readkrxo.mid(210,8),7)) + " [мг/м3]");
+        ui->le_krxodoza->setText(FormatText(IEEE754forKRXO(readkrxo.mid(218,8),7)) + " [мкЗв]");
+
+        if (ui->cb_automode)
+        {
+            repeat();
+        }
+    }
+
+}
+
+
+QString MainWindow::IEEE754forKRXO(QString str, int b) //входной HEX (32bit) переводим в BIN и высчитываем значение по формату IEEE754
+    {
+
+        //b - конечный байт
+
+
+        qDebug()<<"STR AT"<<str.at(b);
+        qDebug()<<"STR AT b-8"<<str.at(b-8);
+
+        QString qs, qsE, qsM;
+        int E,M, znak;
+        float F;
+
+        qs.clear();
+        qsE.clear();
+        qsM.clear();
+        E=0;
+        M=0;
+        F=0;
+
+        qDebug()<<"STRIEEEEE"<<str;
+
+        for (int i=0; i<4; ++i) //c b по b-8 перевели в BIN
+        {
+            qs.append(hextobin(str.at(b-1-(i*2)))); // Пр: 50,48,46...шаг=2
+            qs.append(hextobin(str.at(b-(i*2)))); // Пр: 51,49,47...шаг=2
+        }
+
+        qDebug()<<"QSSSSTRIEEEEE"<<qs;
+
+        /*=== Вычисляем S ===*/
+        if (realint(qs.at(31-31))==0) //Если 31 байт 0, тогда знак "+". Иначе "-" (Вычисляем S из FLOAT)
+
+        znak=1;
+
+        else znak=-1;
+
+        /*=== Вычисляем E ===*/
+        for (int i=0; i<8; ++i) //c 30 по 23 байт - вычисляем E из FLOAT
+        {
+            qsE.append(qs.at((31-30)+i)); //31-23 = 8 т.е. меняем направление счёта. Двигаемся справа налево <-|
+            qDebug()<<"qsE"<<qsE;
+        }
+
+        /*=== Вычисляем M ===*/
+        for (int i=0; i<=22; ++i) //c 22 по 0 байт - вычисляем M из FLOAT
+        {
+            qsM.append(qs.at((32-23)+i)); //Двигаемся справа налево <-|
+            qDebug()<<"qsM"<<qsM;
+        }
+
+        E=bintodec(qsE);
+        M=bintodec(qsM);
+        qDebug()<<"E"<<E;
+        qDebug()<<"M"<<M;
+        F=znak*(qPow(2,E-127))*(1+(M/(qPow(2,23))));
+
+        qDebug()<<"FFFF"<<F;
+        return QString::number(F).toLatin1();
+    }
+
+
+void MainWindow::on_pb_closeportkrxo_clicked()
+{
+    portkrxo->close();
+    ui->pb_closeportkrxo->setEnabled(false);
+    ui->pb_openportkrxo->setEnabled(true);
+    ui->le_countkrxo->clear();
+    ui->le_countkrxo->setEnabled(false);
+    ui->spinBox->setEnabled(true);
+    ui->statusBar->showMessage("Порт БР АСКРХО закрыт!");
+    qDebug()<< "COMPORT KRXO CLOSE!";
+}
+
+void MainWindow::on_pushButton_4_clicked()
+{
+    readkrxo.clear();
+    identkrxo();
+}
+
+
+void MainWindow::on_pushButton_7_clicked()
+{
+
+    rec.clear(); // очищаем глобальную переменную кол-ва записей в HEX
+    readkrxo.clear();
+    identkrxo();
+    timer->singleShot(2000,this,SLOT(resultkrxo()));
+
+}
+
+
+
+void MainWindow::identkrxo()
+{
+    //char data[23]; //0x54 0x52 0x41 0x50 2 0x00 0x00 0x00 0x01 0x00 0x00 0x00
+    QByteArray qbdata, qbdata2, qbdata3;
+    qbdata = QByteArray::fromHex("54524150000000006400000003000000"); //23
+
+    //qbdata[16]=0xA1;
+    //qbdata[17]=0xA9;
+    //qbdata[18]=0xE7;
+    //qbdata[19]=0x3F;
+    qbdata[20]=0x02;
+    qbdata[21]=0x00;
+    qbdata[22]=0x00;
+
+/*
+    data[0]=0x54;
+    data[1]=0x52;
+    data[2]=0x41;
+    data[3]=0x50;
+    // номер КРХО
+    data[4]=0x0A;
+    data[5]=0x00;
+    data[6]=0x00;
+    data[7]=0x00;
+    // _номер КРХО
+    data[8]=0x64;
+    data[9]=0x00;
+    data[10]=0x00;
+    data[11]=0x00;
+    // =========
+    data[12]=0x03;
+    data[13]=0x00;
+    data[14]=0x00;
+    data[15]=0x00;
+    // CRC
+    // инф.
+    //data[16]=0xa1;
+    //data[17]=0xa9;
+    // системн.
+    // для 10
+    data[18]=0xe7;
+    data[19]=0x3f;
+    // для 5 устр-ва
+    data[18]=0x44;
+    data[19]=0x28;
+
+    // end CRC
+
+    data[20]=0x08; //команда P
+    data[21]=0x00; // I
+    data[22]=0x00; // I
+
+*/
+
+
+    QString spbox=ui->spinBox->text();
+    switch (spbox.toInt())
+    {
+    case 1:
+        qbdata[4]=0x01;
+        break;
+    case 2:
+        qbdata[4]=0x02;
+        break;
+    case 3:
+        qbdata[4]=0x03;
+        break;
+    case 4:
+        qbdata[4]=0x04;
+        break;
+    case 5:
+        qbdata[4]=0x05;
+        break;
+    case 6:
+        qbdata[4]=0x06;
+        break;
+    case 7:
+        qbdata[4]=0x07;
+        break;
+    case 8:
+        qbdata[4]=0x08;
+        break;
+    case 9:
+        qbdata[4]=0x09;
+        break;
+    case 10:
+        qbdata[4]=0x0A;
+        break;
+    case 11:
+        qbdata[4]=0x0B;
+        break;
+    case 12:
+        qbdata[4]=0x0C;
+        break;
+    case 13:
+        qbdata[4]=0x0D;
+        break;
+    case 14:
+        qbdata[4]=0x0E;
+        break;
+    case 15:
+        qbdata[4]=0x0F;
+        break;
+    case 16:
+        qbdata[4]=0x10;
+        break;
+    case 17:
+        qbdata[4]=0x11;
+    case 18:
+        qbdata[4]=0x12;
+    case 19:
+        qbdata[4]=0x13;
+    case 20:
+        qbdata[4]=0x14;
+        break;
+    default:
+        break;
+    }
+
+
+    QString qtr, tempstr;
+    QByteArray qba;
+
+    //================ CRC CSd ===================================
+
+    tempstr = bintohex(CRC(datatobin(qbdata, 20, 22))); //вычисляем CRC по инф. части
+    qDebug()<<"tempstr"<<tempstr;
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(2));
+    qtr.append(tempstr.at(3));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata2=QByteArray::fromHex(qba); //CRC по инф. части
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(0));
+    qtr.append(tempstr.at(1));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata2.append(QByteArray::fromHex(qba)); //[16-17] //CRC по инф. части
+
+
+
+
+    //================ CRC CSs ===================================
+
+    QByteArray poi;
+    poi = qbdata.mid(0,16);
+    poi.append(qbdata2.mid(0,2));
+    poi.append(qbdata.mid(18,5));
+
+    qDebug()<<"CRC CSs"<<bintohex(CRC(datatobin(poi, 4, 17)));
+
+    tempstr = bintohex(CRC(datatobin(poi, 4, 17))); //вычисляем CRC по системной части
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(2));
+    qtr.append(tempstr.at(3));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata3=QByteArray::fromHex(qba);
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(0));
+    qtr.append(tempstr.at(1));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata3.append(QByteArray::fromHex(qba)); //[16-17]
+
+
+
+    if (portkrxo->isOpen()) //если порт открыт
+    {
+    portkrxo->write(qbdata,16);
+    portkrxo->write(qbdata2,2);
+    portkrxo->write(qbdata3,2);
+    qbdata.remove(0,20);
+    portkrxo->write(qbdata,3);
+    portkrxo->waitForBytesWritten(2000); //ждем пока не запишутся все данные
+    }
+
+}
+
+
+
+QString MainWindow::datatobin(QByteArray data, int s, int e) //convert HEX to BIN + Polinom^16 (data-hex array, s-start position, e-end position)
+{
+    QByteArray ba, ba2;
+    ba.clear();
+    ba2.clear();
+
+
+    for (s; s<=e; s++)
+    {
+        if (data.at(s)==0) //если пришла ячейка "0"
+        {
+            qDebug()<<"data.at(s)"<<data.at(s);
+            ba.append("00000000");
+        }
+        else
+        {
+            /*
+            if (data.at(s)==1 || data.at(s)==2 ||
+                data.at(s)==3 || data.at(s)==5 || data.at(s)==6 ||
+                data.at(s)==7 || data.at(s)==8 || data.at(s)==9)
+            {
+                ba2="0000";
+                ba2.append(QByteArray::number(data[s], 2));
+                qDebug()<<"IXAAAA"<<ba2;
+            }
+
+        else
+        {
+*/
+            ba2=QByteArray::number(data[s], 2);
+            qDebug()<<"ba2"<<ba2;
+
+
+            if (ba2.length()>8) //если у нас пришло ffff ffff ffff ffxx т.е. в начале ff
+            {
+                ba2=ba2.right(8);
+                qDebug()<<"ba2RIGHT"<<ba2;
+            }
+
+
+            while (ba2.length()<8) //если не кратно 4-м - добавляем в начало "0"
+            {
+                qDebug()<<"ROCKKKK";
+                ba2.insert(0,'0');
+                                qDebug()<<"BA2ROCKKKK"<<ba2;
+            }
+       // }
+
+
+            ba.append(ba2);
+
+        }
+                    qDebug()<<"ba.append(ba2)"<<ba;
+    }
+
+    ba.append("0000000000000000"); //polinom 16 stepen (x^16 + x^12 + x^5 + 1)
+        qDebug()<<"BA"<<ba;
+        data.clear();
+    return ba;
+
+}
+
+
+QString MainWindow::CRC(QString qs) //подсчет контрольной суммы по CRC-16 CCITT (возвращает bin)
+{
+    QString poli="10001000000100001"; //x^16 + x^12 + x^5 + 1
+    QString qstemp; //для куска из пакета
+    QString restemp; // для временного результата при вычитании
+    QRegExp one("[1]");
+    int pos; //позиция единицы
+
+
+    qDebug()<<"QS ORIGINAL"<<qs;
+
+    if (qs.startsWith("0")) //если результата начинается с "0"
+    {
+        pos = one.indexIn(qs);
+        qs.remove(0,pos); //удаляем первые нули до "1"
+    }
+
+    qstemp = qs.left(poli.length()); //вырезаем кусок из изначального пакета
+
+    qs.remove(0,qstemp.length()); //удаляем из первоначального пакета в соответствии с длиной куска
+
+    qDebug()<<"QS ORIGINAL CUT"<<qs;
+
+
+    restemp.clear();
+    for (int i=0; i<qstemp.length();i++) //делаем вычитание XOR
+        {
+
+        restemp.append(XOR(qstemp.at(i), poli.at(i)));
+        qDebug()<<"RESTEMP"<<restemp;
+        }
+
+    qDebug()<<"RESTEMP"<<restemp;
+
+
+    if (restemp.startsWith("0")) //если результата начинается с "0"
+    {
+        pos = one.indexIn(restemp);
+        restemp.remove(0,pos); //удаляем первые нули до "1"
+    }
+
+    qDebug()<<"RESTEMP AFTER REMOVE"<<restemp;
+
+    qstemp=restemp.insert(restemp.length(),qs.left(pos)); //вставляем кол-во символов равное удаленным нулям из первоначального qs
+    qs.remove(0, pos); //удаляем из qs количество вставленных символов
+
+        qDebug()<<"RESTEMP AFTER INSERT"<<restemp;
+        qDebug()<<"QSTEMP AFTER INSERT"<<qstemp;
+
+// ===========================================================================================
+// ===========================================================================================
+// ===========================================================================================
+
+
+   while (poli.length()<=qs.length()+restemp.length())
+   {
+        restemp.clear();
+        for (int i=0; i<qstemp.length();i++) //делаем вычитание XOR
+           {
+           restemp.append(XOR(qstemp.at(i), poli.at(i)));
+           qDebug()<<"RESTEMP2"<<restemp;
+           }
+
+       qDebug()<<"RESTEMP2"<<restemp;
+
+
+       if (restemp.startsWith("0")) //если результата начинается с "0"
+       {
+           pos = one.indexIn(restemp);
+           restemp.remove(0,pos); //удаляем первые нули до "1"
+       }
+
+       qDebug()<<"RESTEMP AFTER REMOVE2"<<restemp;
+
+       qstemp=restemp.insert(restemp.length(),qs.left(pos)); //вставляем кол-во символов равное удаленным нулям из первоначального qs
+       qs.remove(0, pos); //удаляем из qs количество вставленных символов
+
+
+       qDebug()<<"RESTEMP AFTER INSERT2"<<restemp;
+       qDebug()<<"QSTEMP AFTER INSERT2"<<qstemp;
+
+   }
+
+
+while (qstemp.length()%4>0) //если количество не кратно 4, добавляем нули в начало
+{
+    qstemp.insert(0,"0");
+}
+
+qDebug()<<"QSTEMP %"<<qstemp;
+
+qDebug()<<"BIn TO HEX"<<bintohex(qstemp);
+
+
+       return qstemp;
+}
+
+
+QString MainWindow::bintohex(QString bin)
+{
+    QString hexStr = "0123456789abcdef";
+    QStringList List;
+    QString res;
+    List << "0000" << "0001" << "0010" << "0011" << "0100" << "0101" << "0110" << "0111" << "1000" << "1001" << "1010" << "1011" << "1100" << "1101" << "1110"<<"1111";
+
+
+    int binlen = bin.length();
+
+    if ((binlen%4)==0) //если кол-во бит кратно 4
+    {
+        for (int n=0; n<binlen/4; n++)
+        {
+            for (int i=0; i<16; i++)
+            {
+                if (bin.left(4)==List.at(i))
+                    {
+                        res.append(hexStr.at(i));
+                    }
+            }
+                bin.remove(0,4);
+            }
+        return res;
+    }
+    else
+    {
+        return "-1";
+    }
+
+}
+
+
+QString MainWindow::XOR(QString a, QString b)
+{
+    if (a=="0" && b=="0")
+    {
+        return "0";
+    }
+    if (a=="1" && b=="0")
+    {
+        return "1";
+    }
+    if (a=="0" && b=="1")
+    {
+        return "1";
+    }
+    if (a=="1" && b=="1")
+    {
+        return "0";
+    }
+}
+
+
+void MainWindow::resultkrxo()
+{
+
+//=====================================================================================================
+//================================ Для команды 09 =====================================================
+//=====================================================================================================
+
+
+    int dec;
+    bool ok;
+
+    dec = rec.toInt(&ok, 16) - 1;
+
+    rec = QString::number(dec, 16);
+
+    while (rec.length()<4)
+    {
+        rec.insert(0,"0");
+    }
+
+    QString temp = rec.mid(2,2);
+    QString temp2 = rec.mid(0,2);
+    rec.clear();
+    rec.append(temp);
+    rec.append(temp2);
+
+
+    qDebug() << "REC" << rec;
+
+    QByteArray inf = QByteArray::fromHex("0000000000") + QByteArray::fromHex(rec.toLatin1()) + QByteArray::fromHex("0000");
+
+
+    QString number = QString("%1").arg(ui->spinBox->text().toInt(),0,16);
+
+    if (number.length()<2)
+    {
+        number.insert(0,"0");
+    }
+
+    QString qtr, tempstr;
+    QByteArray qba, qbdata2, qbdata3;
+
+    //================ CRC CSd ===================================
+
+    tempstr = bintohex(CRC(datatobin(inf, 0, 8))); //вычисляем CRC по инф. части
+    qDebug()<<"tempstrres"<<tempstr;
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(2));
+    qtr.append(tempstr.at(3));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata2=QByteArray::fromHex(qba); //CRC по инф. части
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(0));
+    qtr.append(tempstr.at(1));
+    qDebug()<<"qtr"<<qtr;
+    qba=qtr.toLatin1();
+    qDebug()<<"qba"<<qba;
+    qbdata2.append(QByteArray::fromHex(qba)); //[16-17] //CRC по инф. части
+
+
+    QByteArray head =  QByteArray::fromHex("54524150");
+    QByteArray sys = QByteArray::fromHex(number.toLatin1()) + QByteArray::fromHex("0000006400000009000000");
+    sys.append(qbdata2);
+
+
+    //================ CRC CSs ===================================
+
+
+    tempstr = bintohex(CRC(datatobin(sys, 0, 13))); //вычисляем CRC по системной части
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(2));
+    qtr.append(tempstr.at(3));
+    qba=qtr.toLatin1();
+    qbdata3=QByteArray::fromHex(qba);
+
+
+    qtr.clear();
+    qba.clear();
+    qtr.append(tempstr.at(0));
+    qtr.append(tempstr.at(1));
+    qba=qtr.toLatin1();
+    qbdata3.append(QByteArray::fromHex(qba)); //[16-17]
+
+
+
+   if (portkrxo->isOpen()) //если порт открыт
+    {
+       // Для команды 09
+       portkrxo->write(head,4);
+       portkrxo->write(sys,14); //параметрическая часть + CRCd
+       portkrxo->write(qbdata3,2); //CRCs
+       portkrxo->write(inf,9); //инф. сообщение
+
+   }
+
+   QTimer* timerkrxo = new QTimer;
+   timerkrxo->singleShot(2000,this,SLOT(resultkrxo03()));
+
+   rec.clear();
+
+
+}
+
+
+void MainWindow::resultkrxo03()
+{
+    //=====================================================================================================
+    //================================ Для команды 03 =====================================================
+    //=====================================================================================================
+
+        QString qtr, tempstr;
+        QByteArray qba, qbdata2, qbdata3;
+
+       QByteArray inf = QByteArray::fromHex("040000");
+       QByteArray head =  QByteArray::fromHex("54524150");
+
+
+       QString number = QString("%1").arg(ui->spinBox->text().toInt(),0,16);
+
+       if (number.length()<2)
+       {
+           number.insert(0,"0");
+       }
+
+
+       //================ CRC CSd ===================================
+
+       tempstr = bintohex(CRC(datatobin(inf, 0, 2))); //вычисляем CRC по инф. части
+       qDebug()<<"tempstrres"<<tempstr;
+
+
+       qtr.clear();
+       qba.clear();
+       qtr.append(tempstr.at(2));
+       qtr.append(tempstr.at(3));
+       qDebug()<<"qtr"<<qtr;
+       qba=qtr.toLatin1();
+       qDebug()<<"qba"<<qba;
+       qbdata2=QByteArray::fromHex(qba); //CRC по инф. части
+
+
+       qtr.clear();
+       qba.clear();
+       qtr.append(tempstr.at(0));
+       qtr.append(tempstr.at(1));
+       qDebug()<<"qtr"<<qtr;
+       qba=qtr.toLatin1();
+       qDebug()<<"qba"<<qba;
+       qbdata2.append(QByteArray::fromHex(qba)); //[16-17] //CRC по инф. части
+
+
+       QByteArray sys = QByteArray::fromHex(number.toLatin1()) + QByteArray::fromHex("0000006400000003000000");
+       sys.append(qbdata2);
+
+
+       //================ CRC CSs ===================================
+
+
+       tempstr = bintohex(CRC(datatobin(sys, 0, 13))); //вычисляем CRC по системной части
+
+
+       qtr.clear();
+       qba.clear();
+       qtr.append(tempstr.at(2));
+       qtr.append(tempstr.at(3));
+       qba=qtr.toLatin1();
+       qbdata3=QByteArray::fromHex(qba);
+
+
+       qtr.clear();
+       qba.clear();
+       qtr.append(tempstr.at(0));
+       qtr.append(tempstr.at(1));
+       qba=qtr.toLatin1();
+       qbdata3.append(QByteArray::fromHex(qba)); //[16-17]
+
+
+
+      if (portkrxo->isOpen()) //если порт открыт
+       {
+          // Для команды 03
+          portkrxo->write(head,4);
+          portkrxo->write(sys,14); //параметрическая часть + CRCd
+          portkrxo->write(qbdata3,2); //CRCs
+          portkrxo->write(inf,3); //инф. сообщение
+
+      }
+
+}
+
+
+//======================================================================================================
+//======================================================================================================
+//================================== GPS БДХК ==========================================================
+//======================================================================================================
+//======================================================================================================
+
+
+void MainWindow::on_pb_giveGPSBDHK_clicked()
+{
+    QByteArray data=QByteArray::fromHex("5452415001с66006");
+
+
+    listhex.clear();
+
+    if (serial->isOpen())
+    {
+        serial->write(data,8);
+        serial->waitForBytesWritten(2000);
+    }
+
+    timer->singleShot(2000, this, SLOT(parse_gpsbdhk()));
+
+}
+
+void MainWindow::parse_gpsbdhk()
+{
+    str.clear();
+    str=listhex.join("");
+    qDebug()<<"GIIIIIIIIII"<<str;
+
+
+}
+
+
+//======================================================================================================
+//======================================================================================================
+//================================== AUTO MODE =========================================================
+//======================================================================================================
+//======================================================================================================
+
+
+void MainWindow::on_cb_automode_clicked()
+{
+    QTimer* timerauto = new QTimer;
+
+    if (ui->cb_automode->isChecked())
+    {
+        // GPS
+        ui->cb_everysecond->setChecked(true);
+        on_cb_everysecond_clicked();
+        ui->cb_everysecond->setEnabled(false);
+        ui->pb_givegps->setEnabled(false);
+        ui->pb_clportgps->setEnabled(false);
+
+/*
+        //BDHK
+        if (ui->pushButton_getValue->isEnabled())
+        {
+            timerauto->singleShot(1000,this,SLOT(on_pushButton_getValue_clicked()));
+        }
+        else
+        {
+            ui->statusBar->showMessage("Не настроен БДХК. Автоматический сбор данных невозможен");
+        }
+
+        // Метео - запускается автоматически после сбора БДХК
+
+        //БК РХО
+        if (!ui->pb_openportkrxo->isEnabled())
+        {
+            timerauto->singleShot(1000,this,SLOT(on_pushButton_7_clicked()));
+        }
+        else
+        {
+            ui->statusBar->showMessage("Порт БР АСКХРО. Автоматический сбор данных невозможен");
+        }
+        */
+
+    }
+
+}
+
+
+void MainWindow::repeat()
+{
+    QTimer* tmr = new QTimer;
+
+    tmr->singleShot(200, this, SLOT(on_cb_automode_clicked()));
+}
+
