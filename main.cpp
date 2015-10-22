@@ -30,6 +30,6 @@ int main(int argc, char *argv[])
     QTimer::singleShot(2500,&w,SLOT(show()));
     w.show();
 
-    //Test 2
+    //Test 223
     return a.exec();
 }
